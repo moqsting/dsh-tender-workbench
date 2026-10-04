@@ -186,7 +186,7 @@ corepack pnpm@11.7.0 run check
 
 ## 整合包（DSH-PackForge）兼容
 
-本插件是自包含的“方案 B”插件 bundle：`cordis.patch.yml` 插入 host 插件，`package.json` 的 `dsh.client` 注入 client 插件，运行时不依赖任何 `@dsh-packforge/*` 引擎包。要把本插件打进 `.dspack` 整合包，可直接使用仓库内样例清单 [packforge/manifest.json](packforge/manifest.json)（manifest v5 / pack v3，`dshVersions` 只声明实测过的 `0.2.0-rc.2`）。该目录不进入 npm 包，仅随源码与导出包分发。
+本插件是自包含的“方案 B”插件 bundle：`cordis.patch.yml` 插入 host 插件，`package.json` 的 `dsh.client` 注入 client 插件，运行时不依赖任何 `@dsh-packforge/*` 引擎包。要把本插件打进 `.dspack` 整合包，**先读整合包集成说明 [docs/PACK-INTEGRATION.md](docs/PACK-INTEGRATION.md)**（依赖矩阵、七条硬约束、可复制的清单、验收清单与回滚），再取仓库内样例清单 [packforge/manifest.json](packforge/manifest.json)（manifest v5 / pack v3，`dshVersions` 只声明实测过的 `0.2.0-rc.2`）。要点：来源连接器 `dsh-mcp-connector` 必须**同时**出现在 `bundles`（负责挂载）与 `dependencies`（负责安装），且排在消费方之前；鉴权用 OAuth 在本机完成，令牌不进包。该目录不进入 npm 包，仅随源码与导出包分发。
 
 ## 界面演示与市场投稿
 

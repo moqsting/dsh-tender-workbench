@@ -175,7 +175,7 @@ See [CHANGELOG.md](CHANGELOG.md) and [the 0.6.1 release checklist](docs/RELEASE-
 
 ## DSH-PackForge (pack) compatibility
 
-The plugin is a self-contained "plan B" bundle: `cordis.patch.yml` inserts the host plugin, `package.json`'s `dsh.client` injects the client plugin, and it depends on no `@dsh-packforge/*` engine package at runtime. To wrap it in a `.dspack`, use the sample manifest at [packforge/manifest.json](packforge/manifest.json) (manifest v5 / pack v3, `dshVersions` listing only the tested `0.2.0-rc.2`). That directory is not part of the npm package; it ships with the source and the exported archive.
+The plugin is a self-contained "plan B" bundle: `cordis.patch.yml` inserts the host plugin, `package.json`'s `dsh.client` injects the client plugin, and it depends on no `@dsh-packforge/*` engine package at runtime. Before wrapping it in a `.dspack`, read the pack integration guide at [docs/PACK-INTEGRATION.md](docs/PACK-INTEGRATION.md) (dependency matrix, seven hard constraints, copy-ready manifest, acceptance checklist and rollback), then use the sample manifest at [packforge/manifest.json](packforge/manifest.json) (manifest v5 / pack v3, `dshVersions` listing only the tested `0.2.0-rc.2`). Key point: the `dsh-mcp-connector` source connector must appear in **both** `bundles` (mount) and `dependencies` (install) and must precede its consumer; authorization is an on-machine OAuth grant, never packaged. That directory is not part of the npm package; it ships with the source and the exported archive.
 
 ## Current scope
 

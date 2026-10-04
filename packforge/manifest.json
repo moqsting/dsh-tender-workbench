@@ -17,7 +17,7 @@
     "0.2.0-rc.2"
   ],
   "launchers": [
-    "dsh",
+    "dshl",
     "dsh-packforge-app"
   ],
   "profileName": "tender",
@@ -29,8 +29,8 @@
     "dsh-tender-workbench"
   ],
   "dependencies": {
-    "dsh-mcp-connector": "0.2.31",
+    "dsh-mcp-connector": "0.2.64",
     "dsh-better-sidebar": "0.24.1",
-    "dsh-tender-workbench": "0.6.1"
+    "dsh-tender-workbench": "github:moqsting/dsh-tender-workbench#ab300229f3a79b8a553ec3e6bb3dfe973e521ec3"
   }
 }

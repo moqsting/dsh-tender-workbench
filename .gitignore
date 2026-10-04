@@ -35,4 +35,5 @@ vitest-report.json
 !/docs/RELEASE-*.md
 !/docs/QCC-BLUE-UI-ACCEPTANCE.md
 !/docs/MARKET-SUBMISSION.md
+!/docs/PACK-INTEGRATION.md
 /references/
