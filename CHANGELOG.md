@@ -4,6 +4,13 @@ All notable changes to `dsh-tender-workbench` are documented in this file.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-04
+
+- 修复来源能力缺失时的错误归因：新增 `not-installed`（来源未安装/不可见）结局，与 `failed`、`no-permission` 分离；`UNKNOWN_TOOL`（工具不存在或对调用者不可见）不再被报成"检查连接与授权"。
+- 全部来源都不可见时返回 `reasonCode=source-tool-missing` 且 `control.retryable=false`，消息点名缺失的具体工具与需安装的连接器（`dsh-mcp-connector` + 企查查 MCP）；混合或瞬时失败仍保持 `all-sources-failed` 且可重试。
+- `TenderExecution.counts` 新增可选 `notInstalled`（旧会话记录仍可解析）；执行终态把不可见来源计入非成功来源，工作台进度条新增该计数与安装指引告警。
+- 新增 `tests/source-tool-failure.spec.ts` 与两条 `tender_workbench_run_query` 回归用例；全套 306 passed / 1 skipped。
+
 ## [0.6.0] - 2026-10-04
 
 - **适配 DSH 0.2.0-rc.2**：peer 全部改为 `~0.2.0-rc.2`，`@deepseek-ai/dsh-client-runtime` 仍不引用；Better Sidebar 可选 peer 升级为 `~0.24.1`（0.18.1 及更早使用已移除的 `settingsNamespace`）。client 运行时 external 全部落在官方 `PLATFORM_MODULES` 基座内，因此 `dsh.client.external` 保持缺省。

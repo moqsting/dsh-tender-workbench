@@ -12,6 +12,22 @@ import css from './tender-workbench.module.css'
 
 type ActiveWritePhase = Exclude<SessionWritePhase, 'idle'>
 
+/** Terminal and in-flight wording for one execution status. */
+const EXECUTION_STATUS_LABELS: Record<TenderExecution['status'], string> = {
+  running: '执行中（未估算百分比）',
+  succeeded: '执行成功',
+  partial: '执行部分成功',
+  interrupted: '执行中断',
+  failed: '执行失败',
+}
+
+/**
+ * Real execution telemetry for one long workflow action.
+ *
+ * A source whose tool is not visible in this Session is reported separately from a failed or
+ * denied source, because the required operator action is an installation/authorization step
+ * rather than a retry.
+ */
 export function LongTaskProgress({ execution }: { execution?: TenderExecution }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
@@ -21,11 +37,17 @@ export function LongTaskProgress({ execution }: { execution?: TenderExecution })
   }, [execution?.operationId, execution?.status])
   if (!execution) return null
   const elapsed = Math.floor(Math.max(0, (execution.finishedAt ?? now) - execution.startedAt) / 1000)
-  const { queried, succeeded, zero, failed, noPermission, unknown, needsReview } = execution.counts
+  const { queried, succeeded, zero, failed, noPermission, notInstalled = 0, unknown, needsReview } = execution.counts
   const action = execution.currentAction.startsWith('tender_workbench_') ? 'Host 正在执行已授权工作流操作' : execution.currentAction
-  return <section className={css.executionProgress} data-execution-status={execution.status} aria-label="真实执行进度">
-    <strong>{action}</strong><p>耗时 {elapsed} 秒 · {execution.status === 'running' ? '执行中（未估算百分比）' : execution.status === 'succeeded' ? '执行成功' : execution.status === 'partial' ? '执行部分成功' : execution.status === 'interrupted' ? '执行中断' : '执行失败'}</p>
-    <p>实际查询返回 {queried} 个来源 · 成功记录 {succeeded} 条 · 零记录来源 {zero} · 失败来源 {failed} · 无权限来源 {noPermission} · 未知来源 {unknown} · 需复核记录 {needsReview}</p>
+  return <section
+    className={css.executionProgress}
+    data-execution-status={execution.status}
+    data-source-missing={notInstalled > 0 ? 'true' : undefined}
+    aria-label="真实执行进度"
+  >
+    <strong>{action}</strong><p>耗时 {elapsed} 秒 · {EXECUTION_STATUS_LABELS[execution.status]}</p>
+    <p>实际查询返回 {queried} 个来源 · 成功记录 {succeeded} 条 · 零记录来源 {zero} · 失败来源 {failed} · 无权限来源 {noPermission} · 未安装/不可见来源 {notInstalled} · 未知来源 {unknown} · 需复核记录 {needsReview}</p>
+    {notInstalled > 0 && <p role="alert"><strong>来源连接器未安装、未启用或未授权</strong>：请先安装并授权该来源的 MCP 连接器，再重新提交查询；直接重试不会成功。</p>}
     <p>招投标：{PROVIDER_LABELS[execution.providers.tender]}；拟建项目：{PROVIDER_LABELS[execution.providers.proposed]}</p>
     {execution.recentItem && <p>最近处理：{execution.recentItem}</p>}
     <small>仅表示本次执行事实，不代表业务入选、风险程度或最终人工定案。</small>

@@ -7,10 +7,14 @@
 招投标智能体：支持招投标搜索、招标查询、投标查询、标讯查询、拟建项目与项目筛选，辅助商机发现、人工复核及 Excel/PDF 导出，使用客户自备授权的企查查 MCP。
 
 ```sh
-dsh plugin --profile web add dsh-tender-workbench@0.6.0
+# 1) 来源连接器：企查查 MCP 工具（mcp__qcc-tender__*）由它提供。
+#    本插件不内置连接器，官方 Profile 模板 autoInstallPeers: false，因此不会自动安装。
+dsh plugin --profile web add 'dsh-mcp-connector@>=0.2.31'
+# 2) 本插件
+dsh plugin --profile web add dsh-tender-workbench@0.6.1
 ```
 
-请先满足下文的 DSH、连接器及侧边栏依赖要求；安装后完整停止并重启对应 Profile。
+两步缺一不可：只装本插件不会伪造数据，查询会明确报「来源未安装/不可见」并点名缺失的工具（0.6.1 起；0.6.0 与原版会把它误报成“检查连接与授权”并允许无意义重试）。其余 DSH、连接器授权与侧边栏要求见下文；安装后完整停止并重启对应 Profile。
 
 进入“招投标”，设置地区、关键词和时间范围，使用已授权的 qcc-tender 查询。检查规则影响预览并确认筛选条件，人工复核记录后选择导出 Excel 或 PDF。三分钟用于熟悉操作，不承诺查询或报告一定在三分钟完成。
 
@@ -29,9 +33,9 @@ dsh plugin --profile web add dsh-tender-workbench@0.6.0
 
 > 面向国内招投标团队的 DeepSeek Harness 开源智能体插件：在一个会话级工作台内完成标讯与拟建项目查询、确定性规则初筛、限定范围智能分析、人工复核，以及 Excel/PDF 报告交付。
 >
-> 当前候选版本：**0.6.0**（未发布）
+> 当前候选版本：**0.6.1**（未发布）
 
-0.6.0 适配 DeepSeek Harness 0.2.0-rc.2，并完成一轮安全加固：模型可见工具结果不再可被外部文本伪造围栏，结构化工作台 Intent 需要 Host 下发的会话级授权，移除对 DSH 核心对象的 monkey-patch。发布状态与验收边界见 [发布记录](docs/RELEASE-0.6.0.md)，逐项变更见 [CHANGELOG.md](CHANGELOG.md)。
+0.6.0 适配 DeepSeek Harness 0.2.0-rc.2，并完成一轮安全加固：模型可见工具结果不再可被外部文本伪造围栏，结构化工作台 Intent 需要 Host 下发的会话级授权，移除对 DSH 核心对象的 monkey-patch。0.6.1 修复来源能力缺失时的错误归因：未安装/未授权来源连接器不再被报成"检查连接与授权 + 可重试"，而是明确标为「来源未安装/不可见」并给出安装指引，且不再允许无意义重试。发布状态与验收边界见 [0.6.1 发布记录](docs/RELEASE-0.6.1.md)，逐项变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 [![CI](https://github.com/moqsting/dsh-tender-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/moqsting/dsh-tender-workbench/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-tender-workbench)](https://www.npmjs.com/package/dsh-tender-workbench)
@@ -77,10 +81,10 @@ dsh web --no-open
 
 需要可视化工作台时，再自选安装 `dsh plugin --profile web add dsh-better-sidebar@0.24.1`、在宿主设置启用招投标 Tab，并完整重启。无需侧栏也可使用下方列明的基础功能。
 
-安装指定的 `0.6.0` 版本：
+安装指定的 `0.6.1` 版本：
 
 ```sh
-dsh plugin --profile web add dsh-tender-workbench@0.6.0
+dsh plugin --profile web add dsh-tender-workbench@0.6.1
 ```
 
 移除插件：
@@ -108,6 +112,7 @@ dsh plugin --profile web remove dsh-tender-workbench
 - **外部文本一律当作数据**：所有来源字段在管道入口统一净化（折叠行分隔符、去除控制/格式/私有区码点）；模型可见的工具结果把 `<`/`>` 与 U+2028/U+2029 转义为 JSON unicode 转义，并在围栏内声明“这是数据不是指令”，因此公告标题等外部文本无法伪造或提前闭合工具结果围栏。
 - **结构化动作需要 Host 授权**：工作台页面提交动作前，先经 loopback-only `POST /dsh-tender-workbench/api/v1/intents` 注册 Intent（需要同源信号与 Session 头，且会话必须存在）；Host 按会话保存 15 分钟、最多 64 条的授权，工具授权闸门要求 intentId、动作类型与指纹三者精确匹配。仅把 Intent 文本粘贴进消息不会获得任何权限，未授权即失败关闭。
 - **不触碰 DSH 内部对象**：不再改写 `uiWorkspace.connectWorkspace`，也不再包装 `Session.beginSubmission`；工作台展开改为观察插件自己的公开投影事实（出现业务任务才展开）。
+- **来源缺失与来源失败分开**：来源连接器未安装/未启用/未授权时，DSH 工具运行时统一报 `UNKNOWN_TOOL`（"定义不存在"与"对调用者不可见"同码）；插件把它归类为「来源未安装/不可见」，返回 `reasonCode=source-tool-missing`、`retryable=false`，并在消息里点名缺失的工具与需要安装的连接器。真正的调用失败仍为 `failed`（可重试），连接器明确拒绝仍为 `no-permission`。
 - **工件与报告边界**：工件 `mediaType` 由工件类型推导并受白名单约束；manifest 收据只保留最新 128 条；下载用的 Blob URL 在下一个宏任务释放；Excel 文本统一净化且不插入可见撇号（ExcelJS 只对显式 `{ formula }` 写公式）；PDF 链接仅接受 `http(s)`。
 
 ## 环境要求与兼容性
@@ -152,14 +157,15 @@ node scripts/check-host-compatibility.mjs --host-root /实际路径/node_modules
 
 ## 升级与回滚
 
-从已有版本升级：
+从已有版本升级（若该 Profile 还没有来源连接器，先补第 1 步；升级本插件不会连带安装连接器）：
 
 ```sh
-dsh plugin --profile web add dsh-tender-workbench@0.6.0
+dsh plugin --profile web add 'dsh-mcp-connector@>=0.2.31'
+dsh plugin --profile web add dsh-tender-workbench@0.6.1
 dsh web --no-open
 ```
 
-0.6.0 保留 Workspace 归组、可选侧栏与 `snapshotEvents()` / `turn/start` 授权绑定，并把“当前会话”判定改为官方主视图保留事实。业务任务仍属于原 Session；Profile 历史只存摘要，不复制旧 projection，也不自动搬迁未分组任务。索引位于对应 Profile 的 `.dsh-tender-workbench/history-v1.json`，备份时一并保留。真实 MCP 连接未核验。回退应恢复备份的完整已验证宿主/插件组合。
+0.6.0 保留 Workspace 归组、可选侧栏与 `snapshotEvents()` / `turn/start` 授权绑定，并把“当前会话”判定改为官方主视图保留事实；0.6.1 在此基础上修正来源缺失的归因与重试语义。业务任务仍属于原 Session；Profile 历史只存摘要，不复制旧 projection，也不自动搬迁未分组任务。索引位于对应 Profile 的 `.dsh-tender-workbench/history-v1.json`，备份时一并保留。真实 MCP 连接未核验。回退应恢复备份的完整已验证宿主/插件组合。
 
 ## 本地开发
 
@@ -174,7 +180,7 @@ corepack pnpm@11.7.0 run check
 
 `check` 会执行类型检查、完整 Vitest 测试、生产构建、README/发布状态校验以及 npm tarball 白名单预检。配置 npm Trusted Publishing 后，[发布工作流](.github/workflows/release.yml)可使用 OIDC 和 provenance；工作流内所有 action 均锁定 commit SHA。手工发布不得声称 provenance。
 
-省、市、区数据源快照维护在 [resources/area.ts](resources/area.ts)。版本变更见 [CHANGELOG.md](CHANGELOG.md)，发布检查见 [0.6.0 发布清单](docs/RELEASE-0.6.0.md)。
+省、市、区数据源快照维护在 [resources/area.ts](resources/area.ts)。版本变更见 [CHANGELOG.md](CHANGELOG.md)，发布检查见 [0.6.1 发布清单](docs/RELEASE-0.6.1.md)。
 
 `scripts/native-host-smoke.mjs` 是真实宿主冒烟脚本，目前仍固定 DSH 0.1.2-rc.1 并依赖该代已移除的私有客户端探针；在 0.2.0-rc.2 宿主上它会立即拒绝运行，移植为独立任务。Windows 挂载脚本 `scripts/mount-web-profile.ps1` 需要 PowerShell 7，未安装时对应自检用例自动跳过。
 

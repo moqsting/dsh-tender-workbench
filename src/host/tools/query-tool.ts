@@ -47,7 +47,8 @@ import { normalizeQccSources } from '../pipeline/normalize.ts'
 import { createScreeningDraftContext } from '../pipeline/screening-context.ts'
 import { assertTenderQueryReady, resolveToolInvocation, toolOriginParameter } from '../tool-contract.ts'
 import { ProviderEnvelopeError, unwrapProviderEnvelope } from '../pipeline/provider-envelope.ts'
-import { emptyExecution, type ProviderOutcome } from '../../contracts/execution.ts'
+import { classifySourceToolFailure, type SourceToolFailureOutcome } from '../pipeline/source-tool-failure.ts'
+import { emptyExecution, type TenderExecution } from '../../contracts/execution.ts'
 import type {} from '../projection.ts'
 
 const QueryToolResultV2Schema = z.object({
@@ -87,7 +88,9 @@ type SourceExecution =
     readonly source: SourceKey
     readonly status: 'failed'
     readonly message: string
-    readonly outcome: Extract<ProviderOutcome, 'failed' | 'no-permission' | 'unknown'>
+    readonly outcome: SourceToolFailureOutcome
+    /** Whether repeating this exact call can plausibly succeed without an environment change. */
+    readonly retryable: boolean
   }
 
 function sanitizeMessage(value: string): string {
@@ -166,8 +169,10 @@ async function executeSource(
   const result = await dependencies.tools.execute(nestedToolExecution(exec, callId, name, args))
   exec.signal.throwIfAborted()
   if (result.isError) {
-    const code = String(result.error.info?.code ?? '')
-    return { source, status: 'failed', outcome: /^(401|403|FORBIDDEN|UNAUTHORIZED|NO_PERMISSION)$/iu.test(code) ? 'no-permission' : 'failed', message: '来源工具调用失败，请检查连接与授权。' }
+    // Capability absence, denial and a real failed call need different operator actions, so the
+    // classification is shared with the skill contract instead of being decided here.
+    const failure = classifySourceToolFailure({ toolName: name, code: String(result.error.info?.code ?? '') })
+    return { source, status: 'failed', outcome: failure.outcome, retryable: failure.retryable, message: failure.message }
   }
   try {
     const candidates = [...extractMcpCanonicalPayloadCandidates(result.value)]
@@ -194,9 +199,50 @@ async function executeSource(
       source,
       status: 'failed',
       outcome: error instanceof ProviderEnvelopeError ? error.outcome : 'unknown',
+      retryable: true,
       message: sanitizeMessage(error instanceof Error ? error.message : '来源结果无法校验。'),
     }
   }
+}
+
+/** Human- and operator-facing reason text for one failed source. */
+function sourceFailureMessage(execution: Extract<SourceExecution, { readonly status: 'failed' }>): string {
+  return `${execution.source}: ${execution.message}`
+}
+
+interface AllSourcesFailedInput {
+  readonly executions: readonly SourceExecution[]
+  readonly previous: TenderWorkflowProjectionV2 | null
+  readonly nextRevision: number
+  readonly intentId: string
+  readonly now: string
+  readonly progress: TenderExecution
+}
+
+/**
+ * Build the terminal result when no source produced a usable snapshot.
+ *
+ * The failure is non-retryable exactly when every failed source is a capability absence
+ * (`not-installed`): repeating the identical call cannot install a connector, so the control says
+ * so instead of inviting a pointless retry. A transient or mixed failure keeps the retry hint.
+ */
+function allSourcesFailedResult(input: AllSourcesFailedInput): JsonValue {
+  const failures = input.executions.filter(
+    (execution): execution is Extract<SourceExecution, { readonly status: 'failed' }> => execution.status === 'failed',
+  )
+  const message = sanitizeMessage(failures.map(sourceFailureMessage).join('；'))
+  const retryable = failures.some(failure => failure.retryable)
+  const reasonCode = failures.length > 0 && failures.every(failure => failure.outcome === 'not-installed')
+    ? 'source-tool-missing'
+    : 'all-sources-failed'
+  return jsonValue(QueryToolResultV2Schema.parse({
+    domain: 'dsh-tender-workbench', schemaVersion: 2, tool: 'tender_workbench_run_query',
+    intentId: input.intentId,
+    outcome: 'failed',
+    message: `查询失败：${message}`.slice(0, 512),
+    state: { ...failedState(input.previous, input.nextRevision, input.intentId, message, input.now, reasonCode), execution: input.progress },
+    control: { status: 'failed', reasonCode, retryable },
+  }))
 }
 
 function failedState(
@@ -205,6 +251,7 @@ function failedState(
   intentId: string,
   message: string,
   now: string,
+  reasonCode: string,
 ): TenderWorkflowProjectionV2 {
   const base = previous ?? createEmptyTenderWorkflowProjection()
   return TenderWorkflowProjectionV2Schema.parse({
@@ -215,9 +262,9 @@ function failedState(
     pendingIntent: undefined,
     stages: {
       ...base.stages,
-      query: { status: 'failed', updatedAt: now, errorCode: 'all-sources-failed', errorMessage: message },
+      query: { status: 'failed', updatedAt: now, errorCode: reasonCode, errorMessage: message },
     },
-    lastFailure: { intentId, tool: 'tender_workbench_run_query', code: 'all-sources-failed', message },
+    lastFailure: { intentId, tool: 'tender_workbench_run_query', code: reasonCode, message },
   })
 }
 
@@ -393,7 +440,10 @@ export function createTenderWorkbenchQueryTool(dependencies: QueryToolDependenci
             publish()
             let execution: SourceExecution
             try { execution = await executeSource(dependencies, exec, source, args) }
-            catch (error) { exec.signal.throwIfAborted(); execution = { source, status: 'failed', outcome: 'failed', message: '来源调用异常，请检查连接后重试。' } }
+            catch (error) {
+              exec.signal.throwIfAborted()
+              execution = { source, status: 'failed', outcome: 'failed', retryable: true, message: '来源调用异常，请检查连接后重试。' }
+            }
             executions.push(execution)
             const outcome = execution.status === 'succeeded' ? execution.adapted.rawRecordCount === 0 ? 'zero' : 'data' : execution.outcome
             progress = { ...progress, updatedAt: Date.now(), recentItem: source === 'tender' ? '招投标来源已返回' : '拟建项目来源已返回',
@@ -401,22 +451,18 @@ export function createTenderWorkbenchQueryTool(dependencies: QueryToolDependenci
               counts: { ...progress.counts, queried: progress.counts.queried + 1,
                 succeeded: progress.counts.succeeded + (execution.status === 'succeeded' ? execution.adapted.items.length : 0),
                 zero: progress.counts.zero + Number(outcome === 'zero'), failed: progress.counts.failed + Number(outcome === 'failed'),
-                noPermission: progress.counts.noPermission + Number(outcome === 'no-permission'), unknown: progress.counts.unknown + Number(outcome === 'unknown') } }
+                noPermission: progress.counts.noPermission + Number(outcome === 'no-permission'),
+                notInstalled: (progress.counts.notInstalled ?? 0) + Number(outcome === 'not-installed'),
+                unknown: progress.counts.unknown + Number(outcome === 'unknown') } }
             publish()
           }
           exec.signal.throwIfAborted()
           const successes = executions.filter((execution): execution is Extract<SourceExecution, { readonly status: 'succeeded' }> => execution.status === 'succeeded')
           const now = new Date().toISOString()
           if (successes.length === 0) {
-            const message = sanitizeMessage(executions.map(execution => execution.status === 'failed' ? `${execution.source}: ${execution.message}` : '').filter(Boolean).join('；'))
-            return jsonValue(QueryToolResultV2Schema.parse({
-              domain: 'dsh-tender-workbench', schemaVersion: 2, tool: 'tender_workbench_run_query',
-              intentId,
-              outcome: 'failed',
-              message: `查询失败：${message}`.slice(0, 512),
-              state: { ...failedState(previous, nextRevision, intentId, message, now), execution: progress },
-              control: { status: 'failed', reasonCode: 'all-sources-failed', retryable: true },
-            })) as ReceiptJsonValue
+            return allSourcesFailedResult({
+              executions, previous, nextRevision, intentId, now, progress,
+            }) as ReceiptJsonValue
           }
 
           const sourceArtifacts: Partial<Record<SourceKey, ArtifactRefV1>> = {}

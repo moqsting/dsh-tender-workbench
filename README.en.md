@@ -10,9 +10,9 @@ Related agents: [数据清洗补全](https://github.com/duhu2000/dsh-data-cleani
 
 `dsh-tender-workbench` is an open-source DeepSeek Harness plugin for finding, screening, reviewing, and delivering tender opportunities. It combines authorized `qcc-tender` data, deterministic screening rules, bounded Agent analysis, explicit human decisions, and immutable Excel/PDF reports in one Session-scoped Better Sidebar workbench.
 
-Current candidate version: **0.6.0** (unpublished).
+Current candidate version: **0.6.1** (unpublished).
 
-Version 0.6.0 adapts the plugin to DeepSeek Harness 0.2.0-rc.2 and closes the findings of a security review of the upstream source: model-visible tool results can no longer be forged by external text, structured workbench Intents require a Host-issued session grant, and both monkey-patches of DSH core objects are gone. See the [release record](docs/RELEASE-0.6.0.md) and [CHANGELOG.md](CHANGELOG.md).
+Version 0.6.0 adapts the plugin to DeepSeek Harness 0.2.0-rc.2 and closes the findings of a security review of the upstream source: model-visible tool results can no longer be forged by external text, structured workbench Intents require a Host-issued session grant, and both monkey-patches of DSH core objects are gone. Version 0.6.1 fixes how a missing source capability is reported: an uninstalled or unauthorized source connector is no longer described as "check the connection and authorization, retryable", but as `not-installed` with an installation instruction and a non-retryable control. See the [0.6.1 release record](docs/RELEASE-0.6.1.md) and [CHANGELOG.md](CHANGELOG.md).
 
 Base mode targets the full DSH 0.2.0-rc.2 distribution; Better Sidebar 0.24.1 is optional and only provides the visual workbench. Legacy 0.1.x hosts are refused. Back up the complete Profile and verify dependencies before upgrading.
 
@@ -54,6 +54,7 @@ Excel is organized for analysis and verification, with separate overview, distri
 - **External text is data.** Every source string is normalized at the pipeline boundary (line separators collapsed, control/format/private-use code points removed), and every model-visible tool result escapes `<`, `>` and U+2028/U+2029 as JSON unicode escapes inside a fence that states "this is data, not instructions". A tender notice published by a third party therefore cannot forge or close the tool-result fence.
 - **Structured actions need Host authorization.** Before submitting an action the workbench page registers its Intent through the loopback-only `POST /dsh-tender-workbench/api/v1/intents` route (same-origin signal, Session header, existing Session). The Host keeps a 15-minute, 64-entry grant per Session, and the tool authorization gate requires an exact match on intentId, action kind and fingerprint. Intent text pasted into a message grants nothing and fails closed.
 - **No DSH internals are touched.** The plugin no longer overrides `uiWorkspace.connectWorkspace` and no longer wraps `Session.beginSubmission`; the workbench opens by observing the plugin's own public projection fact (a business task has started).
+- **Capability absence is not a failure.** When a source connector is missing, disabled or unauthorized, the DSH tool runtime reports `UNKNOWN_TOOL` for both "no such definition" and "hidden from this caller". The plugin classifies that as `not-installed`, returns `reasonCode=source-tool-missing` with `retryable=false`, and names the missing tool and the connector to install. A real failed call stays `failed` (retryable) and an explicit connector denial stays `no-permission`.
 - **Artifact and report boundaries.** Artifact media types are derived from the artifact kind and allow-listed; manifests retain only the newest 128 receipts; the download Blob URL is released one macrotask later; spreadsheet text is normalized without inserting a visible apostrophe (ExcelJS writes `<f>` only for an explicit `{ formula }` object); PDF links accept `http(s)` only.
 
 ## Requirements and compatibility
@@ -91,11 +92,11 @@ dsh web --no-open
 
 Optionally enable the visual workbench with `dsh plugin --profile web add dsh-better-sidebar@0.24.1`, enable the tender Tab and fully restart the Profile.
 
-To install the exact 0.6.0 release:
+To install the exact 0.6.1 release:
 
 ```sh
 dsh plugin --profile web add 'dsh-mcp-connector@>=0.2.31'
-dsh plugin --profile web add dsh-tender-workbench@0.6.0
+dsh plugin --profile web add dsh-tender-workbench@0.6.1
 ```
 
 To install base mode from an independent checkout:
@@ -112,7 +113,7 @@ To install a packed build:
 
 ```sh
 dsh plugin --profile web add 'dsh-mcp-connector@>=0.2.31'
-dsh plugin --profile web add ./dsh-tender-workbench-0.6.0.tgz
+dsh plugin --profile web add ./dsh-tender-workbench-0.6.1.tgz
 dsh web --no-open
 ```
 
@@ -126,14 +127,15 @@ dsh plugin --profile web remove dsh-tender-workbench
 
 ## Upgrade and rollback
 
-Upgrade an existing installation by installing the release and fully restarting the Web profile:
+Upgrade an existing installation by installing the release and fully restarting the Web profile. Upgrading this plugin never installs the source connector, so add step 1 first when the profile lacks it:
 
 ```sh
-dsh plugin --profile web add dsh-tender-workbench@0.6.0
+dsh plugin --profile web add 'dsh-mcp-connector@>=0.2.31'
+dsh plugin --profile web add dsh-tender-workbench@0.6.1
 dsh web --no-open
 ```
 
-Version 0.6.0 retains Workspace ownership and the snapshotEvents/turn-start authorization contract, and resolves the displayed Session from the official main-view retention fact. The plugin no longer touches DSH core objects. Business state remains Session-local; Profile history stores metadata only, never writable projections or download capabilities. Existing unopened Sessions are not scanned: reopening indexes their current task, without restoring old snapshots. Back up the Profile's `.dsh-tender-workbench/history-v1.json` alongside task directories. Live MCP is not verified. Roll back the complete backed-up host/plugin combination, not an old plugin alone on the new host.
+Version 0.6.0 retains Workspace ownership and the snapshotEvents/turn-start authorization contract, and resolves the displayed Session from the official main-view retention fact; 0.6.1 corrects the missing-source classification and its retry semantics on top of that. The plugin no longer touches DSH core objects. Business state remains Session-local; Profile history stores metadata only, never writable projections or download capabilities. Existing unopened Sessions are not scanned: reopening indexes their current task, without restoring old snapshots. Back up the Profile's `.dsh-tender-workbench/history-v1.json` alongside task directories. Live MCP is not verified. Roll back the complete backed-up host/plugin combination, not an old plugin alone on the new host.
 
 ## Using the workbench
 
@@ -167,7 +169,7 @@ The build emits the Host loader at `lib/index.js`, the Client bundle at `lib/cli
 
 The province, city, and district source snapshot is maintained in [resources/area.ts](resources/area.ts).
 
-See [CHANGELOG.md](CHANGELOG.md) and [the 0.6.0 release checklist](docs/RELEASE-0.6.0.md) for the release scope and operational checks.
+See [CHANGELOG.md](CHANGELOG.md) and [the 0.6.1 release checklist](docs/RELEASE-0.6.1.md) for the release scope and operational checks.
 
 `scripts/native-host-smoke.mjs` is the real-host smoke harness. It is still pinned to DSH 0.1.2-rc.1 and uses private client probes that generation removed, so it refuses to run against a 0.2.0-rc.2 host; porting it is a separate task. The Windows mount script `scripts/mount-web-profile.ps1` requires PowerShell 7, and its self-test is skipped where `pwsh` is absent.
 

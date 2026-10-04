@@ -163,6 +163,45 @@ describe('tender_workbench_run_query', () => {
     expect(result.state.query).toBeUndefined()
   })
 
+  it('reports a missing source connector as a non-retryable capability failure', async () => {
+    const missing = (name: string): ToolExecutionResult => ({
+      isError: true,
+      error: { message: `unknown tool "${name}"`, info: { name: 'HarnessError', code: 'UNKNOWN_TOOL' } },
+      content: [{ type: 'text', text: `unknown tool "${name}"` }],
+    })
+    const test = await harness(async name => missing(name))
+    const result = await test.run()
+    expect(result).toMatchObject({
+      outcome: 'failed',
+      control: { status: 'failed', reasonCode: 'source-tool-missing', retryable: false },
+      state: {
+        revision: 1,
+        stages: { query: { status: 'failed', errorCode: 'source-tool-missing' } },
+        execution: {
+          counts: { queried: 2, notInstalled: 2, failed: 0, noPermission: 0, unknown: 0 },
+          providers: { tender: 'not-installed', proposed: 'not-installed' },
+        },
+      },
+    })
+    expect(result.message).toContain('mcp__qcc-tender__search_tenders')
+    expect(result.message).toContain('mcp__qcc-tender__search_proposed_projects')
+    expect(result.message).toContain('未安装')
+    expect(result.message).not.toContain('检查连接与授权')
+    expect(result.state.query).toBeUndefined()
+  })
+
+  it('keeps a mixed failure retryable while still naming the missing connector', async () => {
+    const test = await harness(async name => name.endsWith('search_tenders')
+      ? { isError: true, error: { message: 'unknown tool', info: { name: 'HarnessError', code: 'UNKNOWN_TOOL' } }, content: [] }
+      : failure('proposed unavailable'))
+    const result = await test.run()
+    expect(result.control).toEqual({ status: 'failed', reasonCode: 'all-sources-failed', retryable: true })
+    expect(result.state.execution).toMatchObject({
+      counts: { queried: 2, notInstalled: 1, failed: 1 },
+      providers: { tender: 'not-installed', proposed: 'failed' },
+    })
+  })
+
   it('exposes the complete structured envelope to the Agent renderer', async () => {
     const test = await harness(async () => success(tenderPayload(['t-1'])))
     const input: RunQueryToolInputV2 = {

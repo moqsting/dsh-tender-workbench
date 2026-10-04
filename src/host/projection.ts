@@ -19,7 +19,7 @@ import {
   type WorkflowStage,
 } from '../contracts/workflow.ts'
 import { conversationIntentId, tenderBindingFingerprint, tenderIntentFingerprint } from './intent-fingerprint.ts'
-import { emptyExecution, TenderExecutionSchema, type TenderExecution } from '../contracts/execution.ts'
+import { emptyExecution, nonSuccessSourceCount, TenderExecutionSchema, type TenderExecution } from '../contracts/execution.ts'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap { 'dsh-tender/progress': TenderExecution }
@@ -441,11 +441,32 @@ function applyTenderProjection(state: TenderWorkflowProjectionV2 | null, event: 
       || reportedFailure
       || (next.lastFailure !== undefined && JSON.stringify(next.lastFailure) !== JSON.stringify(state?.lastFailure)))
     execution = { ...execution, updatedAt: event.time, finishedAt: event.time,
-      status: event.type === 'turn/end' ? 'interrupted' : failed ? 'failed' : execution.counts.failed + execution.counts.noPermission + execution.counts.unknown > 0 ? 'partial' : 'succeeded',
+      status: terminalExecutionStatus({
+        interrupted: event.type === 'turn/end',
+        failed,
+        nonSuccessSources: nonSuccessSourceCount(execution),
+      }),
       currentAction: event.type === 'turn/end' ? '执行中断，请核对来源会话' : failed ? '本次操作失败' : '本次操作已结束',
       counts: { ...execution.counts, needsReview: next.review?.pending ?? next.classification?.manualReview ?? 0 } }
   }
   return execution === undefined || next.execution === execution ? next : { ...next, execution }
+}
+
+/**
+ * Terminal status of one finished query operation.
+ *
+ * A turn that ends mid-flight is `interrupted`; a reported failure is `failed`; otherwise the run
+ * is `partial` while any source contributed no usable result — including a source whose tool is
+ * missing — and `succeeded` only when every requested source answered with data or an explicit zero.
+ */
+function terminalExecutionStatus(input: {
+  readonly interrupted: boolean
+  readonly failed: boolean
+  readonly nonSuccessSources: number
+}): TenderExecution['status'] {
+  if (input.interrupted) return 'interrupted'
+  if (input.failed) return 'failed'
+  return input.nonSuccessSources > 0 ? 'partial' : 'succeeded'
 }
 
 export const tenderWorkflowProjectionDefinition: TenderProjectionDefinition = {

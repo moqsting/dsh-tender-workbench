@@ -11,8 +11,8 @@ DSH-PackForge 整合包（`.dspack`）的样例清单，用来把本插件打进
 ```sh
 # 在 dsh-packforge-app / dspack CLI 环境中
 dspack pack --manifest packforge/manifest.json --out .
-dspack view dsh-tender-workbench-pack-0.6.0.dspack
-dspack install dsh-tender-workbench-pack-0.6.0.dspack
+dspack view dsh-tender-workbench-pack-0.6.1.dspack
+dspack install dsh-tender-workbench-pack-0.6.1.dspack
 ```
 
 安全规则（由 packforge 引擎执行）：`node_modules/`、`dist/`、密钥与凭据、嵌套压缩包、`.dshpkcfg`、`.dsh-pack` 一律不进包。本目录本身**不进入 npm 包**（见 `package.json` 的 `files` 白名单与 `scripts/verify-pack.mjs`），只随源码与导出包分发。
