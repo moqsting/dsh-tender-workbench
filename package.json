@@ -1,0 +1,211 @@
+{
+  "name": "dsh-tender-workbench",
+  "version": "0.6.0",
+  "description": "Tender search and bid intelligence in DeepSeek Harness with proposed project search, rule screening, human review and Excel/PDF exports using user-authorized Qichacha MCP.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-pack",
+    "tender",
+    "bidding",
+    "procurement",
+    "proposed-projects",
+    "招投标",
+    "标讯",
+    "拟建项目",
+    "企查查",
+    "招标查询",
+    "投标查询",
+    "标讯查询",
+    "商机发现",
+    "项目筛选",
+    "tender search",
+    "bid intelligence",
+    "proposed project",
+    "企查查MCP",
+    "企查查 MCP",
+    "tender-search",
+    "bid-intelligence"
+  ],
+  "author": "moqsting",
+  "contributors": [
+    "Sunhh3221 (upstream dsh-tender-workbench author)"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "cordis.patch.yml",
+    "docs/RELEASE-0.6.0.md",
+    "lib/index.js",
+    "lib/client.js",
+    "lib/client.js.map",
+    "lib/types/**/*.d.ts",
+    "lib/types/**/*.d.ts.map"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": "~0.2.0-rc.2"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json && tsdown --config tsdown.config.ts",
+    "check": "npm run typecheck && npm run test && npm run build && npm run docs:check && npm run release:check && npm run verify-pack",
+    "docs:check": "node scripts/check-readme-version.mjs",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run check",
+    "release:check": "node scripts/check-release-state.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --project tsconfig.json",
+    "verify-pack": "node scripts/verify-pack.mjs"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "tag": "latest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moqsting/dsh-tender-workbench.git"
+  },
+  "homepage": "https://github.com/moqsting/dsh-tender-workbench#readme",
+  "bugs": {
+    "url": "https://github.com/moqsting/dsh-tender-workbench/issues"
+  },
+  "dependencies": {
+    "@embedpdf/fonts-sc": "1.0.0",
+    "exceljs": "4.4.0",
+    "pdfkit": "0.20.2",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-api-session-controller": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-api-workspace-controller": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-connection": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-locale": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-store": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-session": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-workspace": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-session": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-projection": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-skill": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-util-values": "~0.2.0-rc.2",
+    "@deepseek-ai/dsh-workspace": "~0.2.0-rc.2",
+    "dsh-better-sidebar": "~0.24.1",
+    "dsh-mcp-connector": ">=0.2.31"
+  },
+  "peerDependenciesMeta": {
+    "dsh-better-sidebar": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-connection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-store": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-workspace": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-scope": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-skill": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-util-code-language": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-util-workspace-path": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-workspace": "0.2.0-rc.2",
+    "@shikijs/langs": "^4.3.1",
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.1.0",
+    "@types/node": "^22.18.0",
+    "@types/pdfkit": "0.17.6",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.1",
+    "anser": "^2.3.5",
+    "clsx": "^2.0.0",
+    "diff": "^9.0.0",
+    "dsh-better-sidebar": "0.24.1",
+    "immer": "^10.1.1",
+    "jsdom": "^26.0.0",
+    "katex": "^0.16.47",
+    "lightningcss": "^1.32.0",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-math": "^3.0.0",
+    "micromark-core-commonmark": "^2.0.3",
+    "micromark-extension-gfm": "^3.0.0",
+    "micromark-extension-math": "^3.1.0",
+    "micromark-factory-space": "^2.0.1",
+    "micromark-util-character": "^2.1.1",
+    "micromark-util-classify-character": "^2.0.1",
+    "micromark-util-sanitize-uri": "^2.0.1",
+    "micromark-util-symbol": "^2.0.1",
+    "micromark-util-types": "^2.0.2",
+    "mime-types": "^3.0.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "shiki": "^4.3.1",
+    "simple-icons": "16.31.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8",
+    "zustand": "^5.0.8"
+  }
+}

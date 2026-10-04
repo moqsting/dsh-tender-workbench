@@ -1,0 +1,35 @@
+{
+  "manifestVersion": 5,
+  "type": "profile",
+  "name": "dsh-tender-workbench-pack",
+  "version": "0.6.0",
+  "displayName": {
+    "en": "Tender workbench (0.2.0-rc.2)",
+    "zh": "招投标工作台（0.2.0-rc.2）"
+  },
+  "description": {
+    "en": "Sample DSH-PackForge profile pack that ships dsh-tender-workbench 0.6.0 with its Authorized Qichacha MCP connector.",
+    "zh": "DSH-PackForge profile 形态样例整合包：随包分发 dsh-tender-workbench 0.6.0 与其授权的企查查 MCP 连接器。"
+  },
+  "author": "moqsting",
+  "dshVersion": "0.2.0-rc.2",
+  "dshVersions": [
+    "0.2.0-rc.2"
+  ],
+  "launchers": [
+    "dsh",
+    "dsh-packforge-app"
+  ],
+  "profileName": "tender",
+  "bundles": [
+    "@deepseek-ai/dsh-base",
+    "@deepseek-ai/dsh-web-app",
+    "dsh-better-sidebar",
+    "dsh-tender-workbench"
+  ],
+  "dependencies": {
+    "dsh-mcp-connector": "0.2.31",
+    "dsh-better-sidebar": "0.24.1",
+    "dsh-tender-workbench": "0.6.0"
+  }
+}

@@ -1,0 +1,242 @@
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import {
+  ArtifactRowsPageV1Schema,
+  type ArtifactRowsFilterV1,
+  type ArtifactRowsPageV1,
+} from '../contracts/dataset.ts'
+import type { ArtifactRefV1 } from '../contracts/workflow.ts'
+import {
+  ClassifiedRowsPageV1Schema,
+  RuleArtifactContentV1Schema,
+  type ClassifiedRowsFilterV1,
+  type ClassifiedRowsPageV1,
+  type RuleArtifactContentV1,
+} from '../contracts/screening.ts'
+import {
+  ReviewRowsPageV1Schema,
+  type ReviewRowsFilterV1,
+  type ReviewRowsPageV1,
+} from '../contracts/analysis-review.ts'
+import { ReportDeliveryViewV1Schema, type ReportDeliveryViewV1 } from '../contracts/reporting.ts'
+
+const ARTIFACT_ROUTE_PREFIX = '/dsh-tender-workbench/api/v1/artifacts'
+
+export class ArtifactApiError extends Error {
+  constructor(readonly status: number, message = 'Artifact 读取失败。') {
+    super(message)
+    this.name = 'ArtifactApiError'
+  }
+}
+
+export type ArtifactFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+
+function rowsParameters(filter: ArtifactRowsFilterV1): URLSearchParams {
+  const parameters = new URLSearchParams({
+    page: String(filter.page),
+    pageSize: String(filter.pageSize),
+  })
+  if (filter.query !== undefined) parameters.set('q', filter.query)
+  if (filter.source !== undefined) parameters.set('source', filter.source)
+  if (filter.lifecycle !== undefined) parameters.set('lifecycle', filter.lifecycle)
+  if (filter.fieldStatus !== undefined) parameters.set('fieldStatus', filter.fieldStatus)
+  if (filter.region !== undefined) parameters.set('region', filter.region)
+  if (filter.sort !== undefined) parameters.set('sort', filter.sort)
+  return parameters
+}
+
+export async function fetchArtifactRows(
+  fetcher: ArtifactFetch,
+  sessionId: SessionId,
+  artifact: ArtifactRefV1,
+  filter: ArtifactRowsFilterV1,
+  signal?: AbortSignal,
+): Promise<ArtifactRowsPageV1> {
+  const response = await fetcher(
+    `${ARTIFACT_ROUTE_PREFIX}/${encodeURIComponent(artifact.id)}/rows?${rowsParameters(filter)}`,
+    {
+      method: 'GET',
+      headers: {
+        'X-Dsh-Tender-Session': String(sessionId),
+        'X-Dsh-Tender-Artifact-Token': artifact.accessToken,
+      },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      signal,
+    },
+  )
+  if (!response.ok) throw new ArtifactApiError(response.status)
+  const value: unknown = await response.json()
+  return ArtifactRowsPageV1Schema.parse(value)
+}
+
+function classifiedRowsParameters(filter: ClassifiedRowsFilterV1): URLSearchParams {
+  const parameters = new URLSearchParams({ page: String(filter.page), pageSize: String(filter.pageSize) })
+  if (filter.query !== undefined) parameters.set('q', filter.query)
+  if (filter.source !== undefined) parameters.set('source', filter.source)
+  if (filter.classification !== undefined) parameters.set('classification', filter.classification)
+  if (filter.ruleId !== undefined) parameters.set('ruleId', filter.ruleId)
+  if (filter.conflict !== undefined) parameters.set('conflict', String(filter.conflict))
+  if (filter.fieldStatus !== undefined) parameters.set('fieldStatus', filter.fieldStatus)
+  return parameters
+}
+
+function artifactHeaders(sessionId: SessionId, artifact: ArtifactRefV1): HeadersInit {
+  return {
+    'X-Dsh-Tender-Session': String(sessionId),
+    'X-Dsh-Tender-Artifact-Token': artifact.accessToken,
+  }
+}
+
+export async function fetchClassifiedArtifactRows(
+  fetcher: ArtifactFetch,
+  sessionId: SessionId,
+  artifact: ArtifactRefV1,
+  filter: ClassifiedRowsFilterV1,
+  signal?: AbortSignal,
+): Promise<ClassifiedRowsPageV1> {
+  const response = await fetcher(
+    `${ARTIFACT_ROUTE_PREFIX}/${encodeURIComponent(artifact.id)}/rows?${classifiedRowsParameters(filter)}`,
+    {
+      method: 'GET',
+      headers: artifactHeaders(sessionId, artifact),
+      credentials: 'same-origin',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      signal,
+    },
+  )
+  if (!response.ok) throw new ArtifactApiError(response.status)
+  const value: unknown = await response.json()
+  return ClassifiedRowsPageV1Schema.parse(value)
+}
+
+export async function fetchRuleArtifactContent(
+  fetcher: ArtifactFetch,
+  sessionId: SessionId,
+  artifact: ArtifactRefV1,
+  signal?: AbortSignal,
+): Promise<RuleArtifactContentV1> {
+  const response = await fetcher(
+    `${ARTIFACT_ROUTE_PREFIX}/${encodeURIComponent(artifact.id)}/content`,
+    {
+      method: 'GET',
+      headers: artifactHeaders(sessionId, artifact),
+      credentials: 'same-origin',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      signal,
+    },
+  )
+  if (!response.ok) throw new ArtifactApiError(response.status)
+  const value: unknown = await response.json()
+  return RuleArtifactContentV1Schema.parse(value)
+}
+
+function reviewRowsParameters(filter: ReviewRowsFilterV1): URLSearchParams {
+  const parameters = new URLSearchParams({ page: String(filter.page), pageSize: String(filter.pageSize) })
+  if (filter.queue !== undefined) parameters.set('queue', filter.queue)
+  if (filter.sort !== undefined) parameters.set('sort', filter.sort)
+  if (filter.query !== undefined) parameters.set('q', filter.query)
+  filter.queryRuleIds?.forEach(ruleId => { parameters.append('queryRuleId', ruleId) })
+  if (filter.source !== undefined) parameters.set('source', filter.source)
+  if (filter.classification !== undefined) parameters.set('classification', filter.classification)
+  if (filter.recommendation !== undefined) parameters.set('recommendation', filter.recommendation)
+  if (filter.userDecision !== undefined) parameters.set('userDecision', filter.userDecision)
+  if (filter.deadlineStatus !== undefined) parameters.set('deadlineStatus', filter.deadlineStatus)
+  if (filter.region !== undefined) parameters.set('region', filter.region)
+  if (filter.stage !== undefined) parameters.set('stage', filter.stage)
+  if (filter.procurementMethod !== undefined) parameters.set('procurementMethod', filter.procurementMethod)
+  if (filter.procurementType !== undefined) parameters.set('procurementType', filter.procurementType)
+  if (filter.ruleId !== undefined) parameters.set('ruleId', filter.ruleId)
+  if (filter.risk !== undefined) parameters.set('risk', filter.risk)
+  if (filter.disclosure !== undefined) parameters.set('disclosure', filter.disclosure)
+  if (filter.amountMinCny !== undefined) parameters.set('amountMinCny', String(filter.amountMinCny))
+  if (filter.amountMaxCny !== undefined) parameters.set('amountMaxCny', String(filter.amountMaxCny))
+  return parameters
+}
+
+export async function fetchReviewArtifactRows(
+  fetcher: ArtifactFetch,
+  sessionId: SessionId,
+  artifact: ArtifactRefV1,
+  filter: ReviewRowsFilterV1,
+  signal?: AbortSignal,
+): Promise<ReviewRowsPageV1> {
+  const response = await fetcher(
+    `${ARTIFACT_ROUTE_PREFIX}/${encodeURIComponent(artifact.id)}/review-rows?${reviewRowsParameters(filter)}`,
+    {
+      method: 'GET',
+      headers: artifactHeaders(sessionId, artifact),
+      credentials: 'same-origin',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      signal,
+    },
+  )
+  if (!response.ok) throw new ArtifactApiError(response.status)
+  const value: unknown = await response.json()
+  return ReviewRowsPageV1Schema.parse(value)
+}
+
+export async function fetchReportDeliveryView(
+  fetcher: ArtifactFetch,
+  sessionId: SessionId,
+  artifact: ArtifactRefV1,
+  signal?: AbortSignal,
+): Promise<ReportDeliveryViewV1> {
+  if (artifact.kind !== 'final-snapshot') throw new TypeError('交付视图只接受 final-snapshot Artifact。')
+  const response = await fetcher(
+    `${ARTIFACT_ROUTE_PREFIX}/${encodeURIComponent(artifact.id)}/report-view`,
+    {
+      method: 'GET',
+      headers: artifactHeaders(sessionId, artifact),
+      credentials: 'same-origin',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      signal,
+    },
+  )
+  if (!response.ok) throw new ArtifactApiError(response.status)
+  const value: unknown = await response.json()
+  return ReportDeliveryViewV1Schema.parse(value)
+}
+
+/**
+ * Download one opaque Session-private artifact.
+ *
+ * The temporary Blob URL is released on the next macrotask rather than in the same task as the
+ * synthetic click: some engines abort a download whose object URL is revoked before their
+ * navigation step runs.
+ */
+export async function downloadArtifact(
+  fetcher: ArtifactFetch,
+  sessionId: SessionId,
+  artifact: ArtifactRefV1,
+): Promise<void> {
+  const response = await fetcher(
+    `${ARTIFACT_ROUTE_PREFIX}/${encodeURIComponent(artifact.id)}/download`,
+    {
+      method: 'GET',
+      headers: artifactHeaders(sessionId, artifact),
+      credentials: 'same-origin',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+    },
+  )
+  if (!response.ok) throw new ArtifactApiError(response.status, '文件下载失败。')
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  try {
+    anchor.href = url
+    anchor.download = artifact.fileName
+    anchor.rel = 'noopener'
+    anchor.hidden = true
+    document.body.append(anchor)
+    anchor.click()
+  } finally {
+    anchor.remove()
+    setTimeout(() => { URL.revokeObjectURL(url) }, 0)
+  }
+}

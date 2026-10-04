@@ -1,0 +1,38 @@
+# Dependencies and generated output
+node_modules/
+.pnpm-store/
+lib/
+coverage/
+dist/
+*.tgz
+.package-output/
+
+# Tool caches and logs
+.cache/
+.vite/
+*.log
+pnpm-debug.log*
+npm-debug.log*
+vitest-report.json
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local development instructions and design references
+/AGENTS.md
+/artifacts/
+/_scratch/
+/docs/*
+!/docs/RELEASE-*.md
+!/docs/QCC-BLUE-UI-ACCEPTANCE.md
+!/docs/MARKET-SUBMISSION.md
+/references/

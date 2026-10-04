@@ -1,0 +1,12 @@
+packages:
+  - '.'
+
+# Windows junctions break Node's ESM package resolution (a junctioned dependency cannot see its
+# own nested dependencies), and DSH profiles install with a hoisted linker anyway, so this project
+# uses the same flat layout for local development and CI.
+nodeLinker: hoisted
+
+autoInstallPeers: false
+
+allowBuilds:
+  node-pty: false

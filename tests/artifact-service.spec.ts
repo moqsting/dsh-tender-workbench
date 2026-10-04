@@ -1,0 +1,409 @@
+import { createServer, request as httpRequest, type Server } from 'node:http'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { AddressInfo } from 'node:net'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import { afterEach, describe, expect, it } from 'vitest'
+import { emptyIntentReceiptManifest } from '../src/host/artifacts/intent-receipts.ts'
+import { createArtifactRouteHandler } from '../src/host/artifacts/artifact-route.ts'
+import {
+  ArtifactManifestError,
+  ArtifactTransaction,
+  UnsupportedSessionPersistenceError,
+  readArtifactManifest,
+  resolveArtifactPath,
+  sessionArtifactRoot,
+} from '../src/host/artifacts/store.ts'
+import { adaptQccProposedPayload, adaptQccTenderPayload } from '../src/host/pipeline/qcc-adapters.ts'
+import { normalizeQccSources } from '../src/host/pipeline/normalize.ts'
+import { classifyTenderProjects, createClassifiedDataset, createRulePreviewArtifact } from '../src/host/pipeline/classify.ts'
+import { CLASSIFICATION_VALUES, ruleDraftFingerprint } from '../src/contracts/screening.ts'
+import { ReviewDatasetV1Schema, ReviewRowsPageV1Schema } from '../src/contracts/analysis-review.ts'
+import type { TenderRuleV1 } from '../src/contracts/workflow.ts'
+import { buildReportDataset } from '../src/host/reporting/report-dataset.ts'
+
+const roots: string[] = []
+const servers: Server[] = []
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))))
+  await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true })))
+})
+
+function json(value: unknown): JsonValue {
+  return JSON.parse(JSON.stringify(value)) as JsonValue
+}
+
+/**
+ * Tender deadlines are relative to the run date: an absolute fixture date turns the
+ * `deadlineStatus=active` query into a time bomb that expires with the calendar.
+ */
+function daysFromToday(days: number): string {
+  const date = new Date(Date.now() + days * 24 * 60 * 60 * 1_000)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function dataset() {
+  const tender = adaptQccTenderPayload({
+    查询摘要: { 命中总数: 2, 结果说明: 'loaded', 生效筛选: {} },
+    标讯列表: [
+      { 标讯ID: 't-1', 标题: '江苏数据项目', 信息类型: '招标公告', 公告子状态: '招标', 省市区: '江苏省', 招采单位: [], 项目编号: 'T-1', '预算金额（元）': '1000000', 发布时间: '2026-08-29', 投标截止时间: daysFromToday(20) },
+      { 标讯ID: 't-2', 标题: '上海云项目', 信息类型: '招标公告', 公告子状态: '招标', 省市区: '上海市', 招采单位: [], 项目编号: 'T-2', '预算金额（元）': '', 发布时间: '2026-08-28', 投标截止时间: '近期' },
+    ],
+  })
+  const proposed = adaptQccProposedPayload({
+    查询摘要: { 命中总数: 1, 结果说明: 'loaded', 生效筛选: {} },
+    拟建项目列表: [{ 拟建项目ID: 'p-1', 项目名称: '浙江智算中心', 项目阶段: '项目备案', 审批进度: '审批中', 省市区: '浙江省', '项目总投资（元）': '2亿元', 发布时间: '2026-08-27', 建设单位: [], 项目编号: 'P-1' }],
+  })
+  return normalizeQccSources({
+    tender,
+    proposed,
+    sources: {
+      tender: { status: 'succeeded', loaded: 2 },
+      proposed: { status: 'succeeded', loaded: 1 },
+    },
+    createdAt: '2026-09-01T00:00:00.000Z',
+  })
+}
+
+async function sessionFixture(id: string) {
+  const root = await mkdtemp(join(tmpdir(), `dsh-artifact-${id}-`))
+  roots.push(root)
+  const transcript = join(root, 'session.jsonl.zstd')
+  await writeFile(transcript, 'transcript-sentinel', 'utf8')
+  const header: SessionHeader = { version: 4, isSeeded: false, id: id as SessionId, createdAt: 1 }
+  return { root, transcript, header, session: { id: header.id, header } }
+}
+
+async function listen(handler: ReturnType<typeof createArtifactRouteHandler>) {
+  const server = createServer(handler)
+  servers.push(server)
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = server.address() as AddressInfo
+  return { server, port: address.port }
+}
+
+interface ResponseResult {
+  readonly status: number
+  readonly headers: Record<string, string | string[] | undefined>
+  readonly body: string
+}
+
+async function get(port: number, path: string, headers: Record<string, string | string[]> = {}, method = 'GET'): Promise<ResponseResult> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ host: '127.0.0.1', port, path, method, headers }, response => {
+      const chunks: Buffer[] = []
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)))
+      response.on('end', () => resolve({
+        status: response.statusCode ?? 0,
+        headers: response.headers as ResponseResult['headers'],
+        body: Buffer.concat(chunks).toString('utf8'),
+      }))
+    })
+    request.once('error', reject)
+    request.end()
+  })
+}
+
+describe('Session-private Artifact service', () => {
+  it('uses locate(), isolates Sessions, preserves the transcript, and commits manifest entries atomically', async () => {
+    const first = await sessionFixture('session-a')
+    const second = await sessionFixture('session-b')
+    const persistence = {
+      locate: (header: SessionHeader) => ({ kind: 'jsonl', path: header.id === first.header.id ? first.transcript : second.transcript }),
+    }
+    const firstRoot = sessionArtifactRoot(persistence, first.header)
+    const secondRoot = sessionArtifactRoot(persistence, second.header)
+    expect(firstRoot).not.toBe(secondRoot)
+
+    const transaction = new ArtifactTransaction(firstRoot)
+    await transaction.load()
+    const ref = await transaction.stageJson('normalized-data', 'dataset.json', json(dataset()), 3)
+    const pdf = await transaction.stageBytes('pdf', '阶段性报告.pdf', Buffer.from('%PDF-test'))
+    const excel = await transaction.stageBytes('excel', '数据底稿.xlsx', Buffer.from('xlsx-test'))
+    await transaction.save(emptyIntentReceiptManifest())
+    const manifest = await readArtifactManifest(firstRoot)
+    expect(manifest.artifacts[ref.id]).toMatchObject({ id: ref.id, kind: 'normalized-data', rowCount: 3 })
+    expect(manifest.artifacts[pdf.id]).toMatchObject({ id: pdf.id, kind: 'pdf', mediaType: 'application/pdf' })
+    expect(manifest.artifacts[excel.id]).toMatchObject({ id: excel.id, kind: 'excel' })
+    expect(await readArtifactManifest(secondRoot)).toEqual({ schemaVersion: 2, artifacts: {}, receipts: {} })
+    expect(await readFile(first.transcript, 'utf8')).toBe('transcript-sentinel')
+    expect(await readFile(second.transcript, 'utf8')).toBe('transcript-sentinel')
+  })
+
+  it('fails closed for missing/non-JSONL locations and path traversal', async () => {
+    const fixture = await sessionFixture('unsupported')
+    expect(() => sessionArtifactRoot({ locate: () => undefined }, fixture.header)).toThrow(UnsupportedSessionPersistenceError)
+    expect(() => sessionArtifactRoot({ locate: () => ({ kind: 'sqlite', path: fixture.transcript }) }, fixture.header)).toThrow(UnsupportedSessionPersistenceError)
+    expect(() => resolveArtifactPath(join(fixture.root, 'plugin'), '../session.jsonl')).toThrow(ArtifactManifestError)
+    expect(() => resolveArtifactPath(join(fixture.root, 'plugin'), 'datasets\\escape.json')).toThrow(ArtifactManifestError)
+    const artifactRoot = sessionArtifactRoot({ locate: () => ({ kind: 'jsonl', path: fixture.transcript }) }, fixture.header)
+    await mkdir(artifactRoot, { recursive: true })
+    await writeFile(join(artifactRoot, 'manifest.json'), '{"schemaVersion":1,"artifacts":"broken"}', 'utf8')
+    await expect(readArtifactManifest(artifactRoot)).rejects.toBeInstanceOf(ArtifactManifestError)
+  })
+
+  it('serves authenticated same-origin rows with filtering/pagination and rejects unsafe requests', async () => {
+    const first = await sessionFixture('session-http-a')
+    const second = await sessionFixture('session-http-b')
+    const persistence = {
+      locate: (header: SessionHeader) => ({ kind: 'jsonl', path: header.id === first.header.id ? first.transcript : second.transcript }),
+    }
+    const transaction = new ArtifactTransaction(sessionArtifactRoot(persistence, first.header))
+    await transaction.load()
+    const ref = await transaction.stageJson('normalized-data', 'dataset.json', json(dataset()), 3)
+    await transaction.save(emptyIntentReceiptManifest())
+    const sessions = {
+      get: (id: SessionId) => id === first.header.id ? first.session : id === second.header.id ? second.session : undefined,
+    }
+    const { port } = await listen(createArtifactRouteHandler({ sessions: sessions as never, sessionPersistence: persistence }))
+    const authority = `127.0.0.1:${port}`
+    const headers = {
+      Origin: `http://${authority}`,
+      'Sec-Fetch-Site': 'same-origin',
+      'X-Dsh-Tender-Session': String(first.header.id),
+      'X-Dsh-Tender-Artifact-Token': ref.accessToken,
+    }
+    const page = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows?page=1&pageSize=1&source=tender&fieldStatus=missing&sort=amount-desc`, headers)
+    expect(page.status).toBe(200)
+    expect(JSON.parse(page.body)).toMatchObject({ page: 1, pageSize: 1, total: 2 })
+    expect(page.headers['cache-control']).toBe('private, no-store')
+    expect(page.headers['x-content-type-options']).toBe('nosniff')
+
+    const proposed = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows?page=1&pageSize=50&source=proposed&q=%E6%99%BA%E7%AE%97`, headers)
+    expect(JSON.parse(proposed.body)).toMatchObject({ total: 1, rows: [{ source: 'proposed', sourceId: 'p-1' }] })
+    const overflow = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows?page=99&pageSize=1`, headers)
+    expect(overflow.status).toBe(416)
+
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows`, { ...headers, 'X-Dsh-Tender-Artifact-Token': 'wrong' })).status).toBe(404)
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows`, { ...headers, Origin: 'http://evil.example' })).status).toBe(404)
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows`, { ...headers, 'Sec-Fetch-Site': 'cross-site' })).status).toBe(404)
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows`, { ...headers, 'X-Dsh-Tender-Session': String(second.header.id) })).status).toBe(404)
+    expect((await get(port, '/dsh-tender-workbench/api/v1/artifacts/../../session.jsonl/rows', headers)).status).toBe(404)
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows`, headers, 'POST')).status).toBe(405)
+
+    const duplicateHeaders = { ...headers, 'X-Dsh-Tender-Session': [String(first.header.id), String(first.header.id)] }
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows`, duplicateHeaders)).status).toBe(404)
+
+    const download = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/download`, headers)
+    expect(download.status).toBe(200)
+    expect(download.headers['content-disposition']).toContain('attachment')
+    expect(download.body).toContain('normalizedProjectCount')
+  })
+
+  it('contains an aborted request and continues serving later requests', async () => {
+    const fixture = await sessionFixture('session-abort')
+    const persistence = { locate: () => ({ kind: 'jsonl', path: fixture.transcript }) }
+    const transaction = new ArtifactTransaction(sessionArtifactRoot(persistence, fixture.header))
+    await transaction.load()
+    const ref = await transaction.stageJson('normalized-data', 'dataset.json', json(dataset()), 3)
+    await transaction.save(emptyIntentReceiptManifest())
+    const { port } = await listen(createArtifactRouteHandler({
+      sessions: { get: () => fixture.session } as never,
+      sessionPersistence: persistence,
+    }))
+    const headers = {
+      Origin: `http://127.0.0.1:${port}`,
+      'Sec-Fetch-Site': 'same-origin',
+      'X-Dsh-Tender-Session': String(fixture.header.id),
+      'X-Dsh-Tender-Artifact-Token': ref.accessToken,
+    }
+    await new Promise<void>(resolve => {
+      const request = httpRequest({ host: '127.0.0.1', port, path: `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows`, headers })
+      request.on('error', () => resolve())
+      request.end()
+      request.destroy()
+      setTimeout(resolve, 20)
+    })
+    const next = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${ref.id}/rows`, headers)
+    expect(next.status).toBe(200)
+  })
+
+  it('serves S3 rule content and filterable classified rows without exposing either across Sessions', async () => {
+    const first = await sessionFixture('session-s3-a')
+    const second = await sessionFixture('session-s3-b')
+    const persistence = {
+      locate: (header: SessionHeader) => ({ kind: 'jsonl', path: header.id === first.header.id ? first.transcript : second.transcript }),
+    }
+    const normalized = dataset()
+    const rules: readonly TenderRuleV1[] = [
+      { id: 'include-data', name: '数据项目', enabled: true, action: 'include', sources: ['tender'], scope: 'title', keywords: ['数据'], priority: 100, exceptions: [], reason: '当前目标' },
+      { id: 'observe-cloud', name: '云项目', enabled: true, action: 'observe', sources: ['tender'], scope: 'title', keywords: ['云'], priority: 90, exceptions: [], reason: '继续观察' },
+    ]
+    const run = classifyTenderProjects(normalized.rows, rules)
+    const fingerprint = ruleDraftFingerprint(rules)
+    const transaction = new ArtifactTransaction(sessionArtifactRoot(persistence, first.header))
+    await transaction.load()
+    const classified = await transaction.stageJson('classified-data', 'classified.json', json(createClassifiedDataset({
+      activeDatasetId: 'active-data', ruleSetVersion: 'rsv-1', classifiedAt: '2026-09-01T00:00:00.000Z', run,
+    })), run.total)
+    const preview = await transaction.stageJson('rule-preview', 'preview.json', json(createRulePreviewArtifact({
+      activeDatasetId: 'active-data', basedOnRevision: 1, stateRevision: 2, draftFingerprint: fingerprint, origin: 'user', run,
+    })))
+    const reviewRows = run.rows.map((row, index) => ({
+      schemaVersion: 1,
+      project: row.project,
+      classification: row.classification,
+      ...(row.finalRuleId === undefined ? {} : { finalRuleId: row.finalRuleId }),
+      ...(index < 2 ? { recommendation: {
+        recordRef: row.project.recordId,
+        recommendation: index === 0 ? 'priority-review' : 'watch',
+        reason: '方向相关，需核验资格。',
+        verificationItems: ['核验资格'],
+        limitations: ['无企业画像'],
+        batchId: 'batch-1',
+        committedAt: '2026-09-01T00:00:00.000Z',
+        evidence: [{ ref: `ev:${row.project.recordId}:title`, kind: 'source-field', label: '项目名称', value: row.project.title }],
+      } } : {}),
+      review: { decision: index < 2 ? 'pending' : 'exclude', note: index < 2 ? '' : '用户备注' },
+    }))
+    const review = await transaction.stageJson('review-data', 'review.json', json({
+      schemaVersion: 1,
+      activeDatasetId: 'active-data',
+      classificationArtifactId: classified.id,
+      ruleSetVersion: 'rsv-1',
+      analysisVersion: 'analysis-v1',
+      revision: 2,
+      updatedAt: '2026-09-01T00:00:00.000Z',
+      revertedOperationCount: 0,
+      operations: [{
+        operationId: 'review-operation-1',
+        intentId: 'review-intent-1',
+        appliedAt: '2026-09-01T00:00:00.000Z',
+        changes: [{
+          recordRef: run.rows[2]!.project.recordId,
+          value: { decision: 'exclude', note: '用户备注' },
+        }],
+        previous: [{ recordRef: run.rows[2]!.project.recordId, value: { decision: 'pending', note: '' } }],
+      }],
+      rows: reviewRows,
+    }), reviewRows.length)
+    await transaction.save(emptyIntentReceiptManifest())
+    const sessions = { get: (id: SessionId) => id === first.header.id ? first.session : id === second.header.id ? second.session : undefined }
+    const { port } = await listen(createArtifactRouteHandler({ sessions: sessions as never, sessionPersistence: persistence }))
+    const baseHeaders = {
+      Origin: `http://127.0.0.1:${port}`,
+      'Sec-Fetch-Site': 'same-origin',
+      'X-Dsh-Tender-Session': String(first.header.id),
+    }
+    const classifiedHeaders = { ...baseHeaders, 'X-Dsh-Tender-Artifact-Token': classified.accessToken }
+    const rows = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${classified.id}/rows?page=1&pageSize=50&classification=include&ruleId=include-data&conflict=false&fieldStatus=missing`, classifiedHeaders)
+    expect(rows.status).toBe(200)
+    expect(JSON.parse(rows.body)).toMatchObject({
+      total: 1, datasetTotal: 3, covered: 2, rawMatches: 2,
+      counts: { include: 1, observe: 1, manualReview: 0, exclude: 0, unmatched: 1 },
+      ruleImpacts: expect.any(Array),
+      rows: [{ classification: 'include', finalRuleId: 'include-data', project: { title: '江苏数据项目', dataDisposition: 'normalized' } }],
+    })
+    const classifiedPages = await Promise.all([1, 2, 3].map(async page => JSON.parse((await get(
+      port,
+      `/dsh-tender-workbench/api/v1/artifacts/${classified.id}/rows?page=${page}&pageSize=1`,
+      classifiedHeaders,
+    )).body) as { rows: Array<{ classification: string }> }))
+    expect([...CLASSIFICATION_VALUES]).toEqual(['include', 'observe', 'manual-review', 'exclude', 'unmatched'])
+    expect(classifiedPages.map(page => page.rows[0]?.classification)).toEqual(['include', 'observe', 'unmatched'])
+
+    const reviewHeaders = { ...baseHeaders, 'X-Dsh-Tender-Artifact-Token': review.accessToken }
+    const reviewPage = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${review.id}/review-rows?page=1&pageSize=50&source=tender&classification=include&recommendation=priority-review&userDecision=pending&deadlineStatus=active`, reviewHeaders)
+    expect(reviewPage.status).toBe(200)
+    expect(JSON.parse(reviewPage.body)).toMatchObject({
+      total: 1, pending: 2, reviewed: 1,
+      facets: { regions: expect.arrayContaining(['江苏省', '上海市', '浙江省']), ruleIds: ['include-data', 'observe-cloud'] },
+      audit: [{ operationId: 'review-operation-1', decision: 'exclude', note: '用户备注' }],
+      rows: [{
+        classification: 'include',
+        recommendation: { recommendation: 'priority-review' },
+        review: { decision: 'pending', note: '' },
+        project: { title: '江苏数据项目' },
+      }],
+    })
+    const firstPending = ReviewRowsPageV1Schema.parse(JSON.parse((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${review.id}/review-rows?page=1&pageSize=1&queue=pending&sort=recommendation`, reviewHeaders)).body) as unknown)
+    const secondPending = ReviewRowsPageV1Schema.parse(JSON.parse((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${review.id}/review-rows?page=2&pageSize=1&queue=pending&sort=recommendation`, reviewHeaders)).body) as unknown)
+    expect(firstPending).toMatchObject({ page: 1, total: 2, pending: 2, reviewed: 1, rows: [{ recommendation: { recommendation: 'priority-review' } }] })
+    expect(secondPending).toMatchObject({ page: 2, total: 2, rows: [{ recommendation: { recommendation: 'watch' } }] })
+    const reviewedPage = ReviewRowsPageV1Schema.parse(JSON.parse((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${review.id}/review-rows?queue=reviewed&sort=recommendation`, reviewHeaders)).body) as unknown)
+    expect(reviewedPage).toMatchObject({ total: 1, rows: [{ review: { decision: 'exclude' }, classification: 'unmatched' }] })
+    const analysisEligible = ReviewRowsPageV1Schema.parse(JSON.parse((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${review.id}/review-rows?queue=analysis-eligible&sort=recommendation`, reviewHeaders)).body) as unknown)
+    expect(analysisEligible.total).toBe(2)
+    expect(analysisEligible.rows.every(row => row.classification !== 'exclude' && row.classification !== 'unmatched')).toBe(true)
+    const visibleRuleSearch = ReviewRowsPageV1Schema.parse(JSON.parse((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${review.id}/review-rows?q=%E4%BA%91%E6%96%B9%E5%90%91&queryRuleId=observe-cloud`, reviewHeaders)).body) as unknown)
+    expect(visibleRuleSearch).toMatchObject({ total: 1, rows: [{ finalRuleId: 'observe-cloud', project: { title: '上海云项目' } }] })
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${review.id}/review-rows`, { ...reviewHeaders, 'X-Dsh-Tender-Session': String(second.header.id) })).status).toBe(404)
+
+    const previewHeaders = { ...baseHeaders, 'X-Dsh-Tender-Artifact-Token': preview.accessToken }
+    const content = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${preview.id}/content`, previewHeaders)
+    expect(content.status).toBe(200)
+    expect(JSON.parse(content.body)).toMatchObject({ activeDatasetId: 'active-data', draftFingerprint: fingerprint, total: 3 })
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${classified.id}/content`, classifiedHeaders)).status).toBe(404)
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${preview.id}/content`, { ...previewHeaders, 'X-Dsh-Tender-Session': String(second.header.id) })).status).toBe(404)
+  })
+
+  it('serves only a bounded report view from an authenticated final snapshot', async () => {
+    const first = await sessionFixture('session-report-a')
+    const second = await sessionFixture('session-report-b')
+    const persistence = {
+      locate: (header: SessionHeader) => ({ kind: 'jsonl', path: header.id === first.header.id ? first.transcript : second.transcript }),
+    }
+    const normalized = dataset()
+    const review = ReviewDatasetV1Schema.parse({
+      schemaVersion: 1,
+      activeDatasetId: 'active-data',
+      revision: 1,
+      updatedAt: '2026-09-03T10:00:00.000+08:00',
+      revertedOperationCount: 0,
+      operations: [],
+      rows: normalized.rows.map(project => ({
+        schemaVersion: 1,
+        project,
+        review: { decision: 'confirmed-candidate', note: '' },
+      })),
+    })
+    const reportDataset = buildReportDataset({
+      finalSnapshotId: 'snapshot-v2',
+      createdAt: '2026-09-03T10:00:00.000+08:00',
+      stateRevision: 4,
+      normalized,
+      review,
+      query: {
+        scope: 'combined',
+        targetSummary: '数据与智算机会',
+        sources: {
+          tender: { status: 'succeeded', loaded: 2 },
+          proposed: { status: 'succeeded', loaded: 1 },
+        },
+      },
+    })
+    const transaction = new ArtifactTransaction(sessionArtifactRoot(persistence, first.header))
+    await transaction.load()
+    const snapshot = await transaction.stageJson('final-snapshot', 'snapshot.json', json(reportDataset), reportDataset.rows.length)
+    const normalizedRef = await transaction.stageJson('normalized-data', 'normalized.json', json(normalized), normalized.rows.length)
+    await transaction.save(emptyIntentReceiptManifest())
+    const sessions = { get: (id: SessionId) => id === first.header.id ? first.session : id === second.header.id ? second.session : undefined }
+    const { port } = await listen(createArtifactRouteHandler({ sessions: sessions as never, sessionPersistence: persistence }))
+    const headers = {
+      Origin: `http://127.0.0.1:${port}`,
+      'Sec-Fetch-Site': 'same-origin',
+      'X-Dsh-Tender-Session': String(first.header.id),
+      'X-Dsh-Tender-Artifact-Token': snapshot.accessToken,
+    }
+    const response = await get(port, `/dsh-tender-workbench/api/v1/artifacts/${snapshot.id}/report-view`, headers)
+    expect(response.status).toBe(200)
+    const view = JSON.parse(response.body) as Record<string, unknown>
+    expect(view).toMatchObject({
+      schemaVersion: 1,
+      finalSnapshotId: 'snapshot-v2',
+      completeness: 'complete',
+      analysisCoverage: { completed: 0, total: 3 },
+    })
+    expect(view).not.toHaveProperty('rows')
+    expect(view).not.toHaveProperty('invalidRecords')
+    expect(response.body.length).toBeLessThan(256 * 1_024)
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${snapshot.id}/report-view`, { ...headers, 'X-Dsh-Tender-Session': String(second.header.id) })).status).toBe(404)
+    expect((await get(port, `/dsh-tender-workbench/api/v1/artifacts/${normalizedRef.id}/report-view`, { ...headers, 'X-Dsh-Tender-Artifact-Token': normalizedRef.accessToken })).status).toBe(404)
+  })
+})

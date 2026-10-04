@@ -1,0 +1,217 @@
+import { describe, expect, it } from 'vitest'
+import {
+  adaptQccProposedPayload,
+  adaptQccTenderPayload,
+  QccSourceContractError,
+} from '../src/host/pipeline/qcc-adapters.ts'
+import {
+  normalizeAmount,
+  normalizeDate,
+  normalizeQccSources,
+} from '../src/host/pipeline/normalize.ts'
+
+const summary = { 命中总数: 2, 结果说明: '实际加载范围', 生效筛选: { keywords: ['数据'] } }
+
+function tenderPayload(items: readonly unknown[]) {
+  return { 查询摘要: summary, 标讯列表: items }
+}
+
+function proposedPayload(items: readonly unknown[]) {
+  return { 查询摘要: summary, 拟建项目列表: items }
+}
+
+function tenderItem(overrides: Record<string, unknown> = {}) {
+  return {
+    标讯ID: 't-1',
+    标题: '某银行数据治理项目',
+    信息类型: '招标公告',
+    公告子状态: '招标',
+    省市区: '江苏省',
+    招采单位: [{ 企业ID: 'e-1', 企业名称: '某银行' }],
+    项目编号: '',
+    '预算金额（元）': '8,600,000',
+    发布时间: '2026-08-29',
+    投标截止时间: '2026-09-09 17:00:00',
+    ...overrides,
+  }
+}
+
+describe('qcc source adapters and deterministic normalization', () => {
+  it('keeps schema-valid source facts unchanged while adding separate normalized values', () => {
+    const sourceTitle = ' 某银行数据治理项目（来源原值） '
+    const amount = '约 860 万元'
+    const adapted = adaptQccTenderPayload(tenderPayload([tenderItem({
+      标题: sourceTitle,
+      '预算金额（元）': amount,
+      招采方式: '公开招标',
+      招采类型: '服务',
+      标讯行业分类: ['信息技术'],
+      相关产品: ['数据治理软件'],
+      代理单位: [{ 企业ID: 'agent-1', 企业名称: '某代理机构' }],
+    })]))
+    const dataset = normalizeQccSources({
+      tender: adapted,
+      sources: { tender: { status: 'succeeded', loaded: 1 } },
+      createdAt: '2026-09-01T00:00:00.000Z',
+    })
+    expect(dataset.rows).toHaveLength(1)
+    expect(dataset.rows[0]?.title).toBe(sourceTitle)
+    expect(dataset.rows[0]?.amount).toMatchObject({
+      original: amount,
+      minCny: 8_600_000,
+      maxCny: 8_600_000,
+      parseStatus: 'approximate',
+    })
+    expect(dataset.rows[0]?.announcements[0]?.sourceRecordId).toBe('t-1')
+    expect(dataset.rows[0]?.tenderDetails).toMatchObject({
+      infoType: { original: '招标公告', value: '招标公告', status: 'normalized' },
+      noticeStatus: { original: '招标', value: '招标', status: 'normalized' },
+      procurementMethod: { value: '公开招标' },
+      procurementType: { value: '服务' },
+      industries: ['信息技术'],
+      products: ['数据治理软件'],
+      agents: [{ id: 'agent-1', name: '某代理机构' }],
+    })
+    expect(dataset.rows[0]?.announcements[0]?.tenderDetails).toEqual(dataset.rows[0]?.tenderDetails)
+    expect(dataset).not.toHaveProperty('confidence')
+  })
+
+  it('distinguishes missing, unparseable, and definite technical schema errors', () => {
+    const adapted = adaptQccTenderPayload(tenderPayload([
+      tenderItem({ 标讯ID: 'missing', 省市区: undefined, '预算金额（元）': undefined, 发布时间: undefined }),
+      tenderItem({ 标讯ID: 'unparseable', 省市区: '浙江省', '预算金额（元）': '金额待议', 发布时间: '近期' }),
+      tenderItem({ 标讯ID: 42 }),
+    ]))
+    const dataset = normalizeQccSources({
+      tender: adapted,
+      sources: { tender: { status: 'succeeded', loaded: 3 } },
+      createdAt: '2026-09-01T00:00:00.000Z',
+    })
+    expect(adapted.invalidRecords).toHaveLength(1)
+    expect(adapted.invalidRecords[0]?.code).toBe('invalid-item-schema')
+    expect(dataset.summary.invalidRecordCount).toBe(1)
+    expect(dataset.rows.find(row => row.sourceId === 'missing')?.amount.parseStatus).toBe('missing')
+    expect(dataset.rows.find(row => row.sourceId === 'unparseable')?.amount).toMatchObject({
+      original: '金额待议', parseStatus: 'unparseable',
+    })
+    expect(dataset.rows.find(row => row.sourceId === 'unparseable')?.publishedAt).toMatchObject({
+      original: '近期', parseStatus: 'unparseable',
+    })
+  })
+
+  it('never fuzzy-merges records by title or company and only links explicit stable relations', () => {
+    const separate = adaptQccTenderPayload(tenderPayload([
+      tenderItem({ 标讯ID: 'one', 项目编号: '' }),
+      tenderItem({ 标讯ID: 'two', 项目编号: '' }),
+    ]))
+    const separateDataset = normalizeQccSources({
+      tender: separate,
+      sources: { tender: { status: 'succeeded', loaded: 2 } },
+      createdAt: '2026-09-01T00:00:00.000Z',
+    })
+    expect(separateDataset.rows).toHaveLength(2)
+    expect(separateDataset.summary.linkedRecordCount).toBe(0)
+
+    const linked = adaptQccTenderPayload(tenderPayload([
+      tenderItem({ 标讯ID: 'notice-1', 项目编号: 'EXPLICIT-001', 公告子状态: '招标', 发布时间: '2026-08-20' }),
+      tenderItem({ 标讯ID: 'notice-2', 项目编号: 'EXPLICIT-001', 公告子状态: '更正公告', 发布时间: '2026-08-21', '预算金额（元）': undefined }),
+    ]))
+    const linkedDataset = normalizeQccSources({
+      tender: linked,
+      sources: { tender: { status: 'succeeded', loaded: 2 } },
+      createdAt: '2026-09-01T00:00:00.000Z',
+    })
+    expect(linkedDataset.rows).toHaveLength(1)
+    expect(linkedDataset.rows[0]?.announcements).toHaveLength(2)
+    expect(linkedDataset.rows[0]?.lifecycle).toBe('amended')
+    expect(linkedDataset.rows[0]?.amount.original).toBe('8,600,000')
+    expect(linkedDataset.summary.linkedRecordCount).toBe(1)
+  })
+
+  it('keeps tender and proposed-project source semantics separate', () => {
+    const tender = adaptQccTenderPayload(tenderPayload([tenderItem({ 标讯ID: 'award', 信息类型: '中标公告', 公告子状态: '中标成交' })]))
+    const proposed = adaptQccProposedPayload(proposedPayload([{
+      拟建项目ID: 'p-1', 项目名称: '智算中心拟建项目', 项目阶段: '项目备案', 审批进度: '审批中',
+      省市区: '浙江省', '项目总投资（元）': '4.6亿元', 发布时间: '2026-08-27', 建设单位: [],
+      审批单位: [{ 企业ID: 'approval-1', 企业名称: '某审批单位' }], 项目编号: 'P-1',
+    }]))
+    const dataset = normalizeQccSources({
+      tender,
+      proposed,
+      sources: {
+        tender: { status: 'succeeded', loaded: 1 },
+        proposed: { status: 'succeeded', loaded: 1 },
+      },
+      createdAt: '2026-09-01T00:00:00.000Z',
+    })
+    expect(dataset.rows.find(row => row.source === 'tender')?.lifecycle).toBe('awarded')
+    expect(dataset.rows.find(row => row.source === 'proposed')?.lifecycle).toBe('early-signal')
+    expect(dataset.rows.find(row => row.source === 'proposed')?.amount.type).toBe('total-investment')
+    expect(dataset.rows.find(row => row.source === 'proposed')?.proposedDetails).toEqual({
+      projectStage: { original: '项目备案', value: '项目备案', status: 'normalized' },
+      approvalProgress: { original: '审批中', value: '审批中', status: 'normalized' },
+      approvalAuthorities: [{ id: 'approval-1', name: '某审批单位' }],
+    })
+  })
+
+  it('rejects only definite payload-envelope contract violations and parses strict dates/amounts', () => {
+    expect(() => adaptQccTenderPayload({ 查询摘要: summary, 标讯列表: 'not-an-array' }))
+      .toThrow('来源返回结构未知')
+    expect(normalizeDate('2026-02-30').parseStatus).toBe('unparseable')
+    expect(normalizeDate('2026-08').precision).toBe('month')
+    expect(normalizeAmount('300万元以上', 'budget')).toMatchObject({ minCny: 3_000_000, parseStatus: 'range' })
+  })
+
+  it('treats missing, null, and empty optional source fields as undisclosed facts', () => {
+    const tender = adaptQccTenderPayload({
+      查询摘要: null,
+      标讯列表: [{
+        标讯ID: 'nullable-tender',
+        标题: '可选字段不完整的标讯',
+        信息类型: null,
+        省市区: null,
+        招采单位: [{ 企业名称: '采购单位' }],
+        代理单位: null,
+        相关产品: null,
+      }],
+    })
+    const proposed = adaptQccProposedPayload({
+      拟建项目列表: [{
+        拟建项目ID: 'nullable-proposed',
+        项目名称: '可选字段不完整的拟建项目',
+        项目阶段: null,
+        '项目总投资（元）': null,
+        建设单位: [{ 企业ID: 'builder-without-name' }],
+        审批单位: null,
+      }],
+    })
+    const dataset = normalizeQccSources({
+      tender,
+      proposed,
+      sources: {
+        tender: { status: 'succeeded', loaded: 1 },
+        proposed: { status: 'succeeded', loaded: 1 },
+      },
+      createdAt: '2026-09-01T00:00:00.000Z',
+    })
+
+    expect(tender.summary).toBeUndefined()
+    expect(proposed.summary).toBeUndefined()
+    expect(dataset.rows).toHaveLength(2)
+    expect(dataset.summary.invalidRecordCount).toBe(0)
+    expect(dataset.rows.find(row => row.sourceId === 'nullable-tender')).toMatchObject({
+      region: { status: 'missing' },
+      tenderDetails: { infoType: { status: 'missing' }, agents: [], products: [] },
+    })
+    expect(dataset.rows.find(row => row.sourceId === 'nullable-tender')?.announcements[0]?.parties)
+      .toEqual([{ id: '', name: '采购单位' }])
+    expect(dataset.rows.find(row => row.sourceId === 'nullable-proposed')?.amount.parseStatus).toBe('missing')
+  })
+
+  it('does not equate missing/null/unknown payloads with explicit zero records', () => {
+    expect(() => adaptQccTenderPayload({ 查询摘要: {} })).toThrow('来源返回结构未知')
+    expect(() => adaptQccProposedPayload({ 查询摘要: {}, 拟建项目列表: null })).toThrow('来源返回结构未知')
+    expect(() => adaptQccTenderPayload({})).toThrow('来源返回结构未知')
+    expect(adaptQccTenderPayload({ 标讯列表: [] })).toMatchObject({ items: [], rawRecordCount: 0 })
+  })
+})

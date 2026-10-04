@@ -1,0 +1,46 @@
+import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it } from 'vitest'
+
+const scriptUrl = new URL('../scripts/mount-web-profile.ps1', import.meta.url)
+const scriptPath = fileURLToPath(scriptUrl)
+
+/** The runner requires PowerShell 7; a machine without `pwsh` skips the self-test instead of failing. */
+function hasPwsh(): boolean {
+  return spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' }).status === 0
+}
+
+describe('web Profile mount runner', () => {
+  it.runIf(process.platform === 'win32' && hasPwsh())('passes its side-effect-free self-test', () => {
+    const result = spawnSync(
+      'pwsh',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', scriptPath, '-SelfTest'],
+      { encoding: 'utf8' },
+    )
+
+    expect(result.stderr).toBe('')
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('mount-web-profile self-test: OK')
+  })
+
+  it('contains the stale-write and package-manager guards', () => {
+    const body = readFileSync(scriptUrl, 'utf8')
+
+    expect(body).toContain("$DshReferenceVersion = '0.2.0-rc.2'")
+    expect(body).toContain('check-host-compatibility.mjs')
+    expect(body).toContain('[switch]$Workbench')
+    expect(body).toContain("if ($Workbench) { $preflightArguments += '--workbench' }")
+    expect(body).not.toContain('Better Sidebar must precede the workbench.')
+    expect(body).not.toMatch(/'add',\s*'dsh-better-sidebar/u)
+    expect(body).toContain('No Profile change was made.')
+    expect(body).toContain('Profile changed during preparation; refusing stale write.')
+    expect(body).toContain('DSH child pnpm is')
+    expect(body).toContain('Refusing downgrade')
+    expect(body).toContain('Changed bytes reused a tarball filename.')
+    expect(body).toContain('Replacing non-content-addressed Profile dependency')
+    expect(body).toContain("dsh-tender-pack-$([guid]::NewGuid().ToString('N'))")
+    expect(body).toMatch(/'add',\s+\$stableTarball,/u)
+    expect(body).not.toMatch(/'add',\s+\$packageTarball,/u)
+  })
+})

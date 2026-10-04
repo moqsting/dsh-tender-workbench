@@ -1,0 +1,209 @@
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { Session, type SessionId, type UserMessage } from '@deepseek-ai/dsh-session'
+import { describe, expect, it } from 'vitest'
+import type { TenderWorkbenchIntentV2 } from '../src/contracts/intents.ts'
+import { createEmptyTenderWorkflowProjection, type TenderWorkflowProjectionV2 } from '../src/contracts/workflow.ts'
+import { serializeTenderWorkbenchIntent } from '../src/client/intents/screening-intent.ts'
+import { conversationIntentId, tenderIntentFingerprint } from '../src/host/intent-fingerprint.ts'
+import { workbenchIntentAuthorizations } from '../src/host/intents/authorization.ts'
+import { resolveToolInvocation } from '../src/host/tool-contract.ts'
+
+function execution(intent: TenderWorkbenchIntentV2, laterText?: string, options: { grant?: boolean } = {}): ToolRunContext {
+  const session = Session.create('session-1' as SessionId)
+  const messages = [serializeTenderWorkbenchIntent(intent), ...(laterText === undefined ? [] : [laterText])]
+  messages.forEach((text, index) => {
+    session.append('turn/start', { turn: index + 1 })
+    session.append('user/message', {
+      role: 'user', id: `fixture-user-${index}` as UserMessage['id'], source: { kind: 'user' }, content: [{ type: 'text', text }],
+    }, { surfaceOp: 'append' })
+  })
+  expect('events' in session).toBe(false) // Never hide the removed public API behind a fake.
+  // A workbench Intent is only actionable after the workbench page registered it with the Host.
+  if (options.grant !== false) {
+    workbenchIntentAuthorizations.issueParsed(String(session.id), intent, tenderIntentFingerprint(intent))
+  }
+  return {
+    callId: 'call-1', rootCallId: 'call-1', token: Symbol('call'),
+    signal: new AbortController().signal,
+    agent: {
+      id: 'agent-1',
+      session,
+    },
+  } as unknown as ToolRunContext
+}
+
+function pending(intent: TenderWorkbenchIntentV2): TenderWorkflowProjectionV2 {
+  const state = createEmptyTenderWorkflowProjection()
+  return {
+    ...state,
+    pendingIntent: {
+      intentId: intent.intentId,
+      kind: intent.kind,
+      skill: intent.skill,
+      origin: 'workbench-intent',
+      status: 'running',
+      turn: 1,
+      expectedTool: intent.kind === 'query.run'
+        ? 'tender_workbench_run_query'
+        : 'tender_workbench_get_report_narrative_context',
+      terminalTools: intent.kind === 'query.run'
+        ? ['tender_workbench_run_query']
+        : ['tender_workbench_create_report'],
+      intentFingerprint: tenderIntentFingerprint(intent),
+      bindingFingerprint: 'binding-test',
+    },
+  }
+}
+
+describe('Host Tool invocation binding', () => {
+  it('requires actual query Tool arguments to equal the current workbench Intent', () => {
+    const intent: TenderWorkbenchIntentV2 = {
+      schemaVersion: 2, intentId: 'query-1', kind: 'query.run', skill: 'tender-workbench-query',
+      binding: { projectionRevision: 0 },
+      payload: { scope: 'tender', target: '数据项目', tender: { keywords: ['数据'] } },
+    }
+    const args = {
+      schemaVersion: 2, origin: { kind: 'workbench-intent', intentId: intent.intentId },
+      projectionRevision: 0, ...intent.payload,
+    }
+    expect(resolveToolInvocation({
+      rawOrigin: args.origin, rawArgs: args, exec: execution(intent), state: pending(intent),
+      tool: 'tender_workbench_run_query', intentKind: 'query.run', mutation: true,
+    })).toEqual({ origin: 'workbench-intent', intentId: intent.intentId })
+    expect(() => resolveToolInvocation({
+      rawOrigin: args.origin, rawArgs: { ...args, target: '被 Agent 改写' },
+      exec: execution(intent), state: pending(intent),
+      tool: 'tender_workbench_run_query', intentKind: 'query.run', mutation: true,
+    })).toThrow('与工作台 Intent 不一致')
+  })
+
+  it('binds requested report context without copying the report payload into the read Tool', () => {
+    const intent: TenderWorkbenchIntentV2 = {
+      schemaVersion: 2, intentId: 'report-1', kind: 'report.create', skill: 'tender-workbench-report',
+      binding: {
+        activeDatasetRef: 'data-1', projectionRevision: 0,
+        basis: { kind: 'dataset-only' }, reviewRevision: 0,
+      },
+      payload: { scope: 'complete', confirmPending: false, narrativeMode: 'requested' },
+    }
+    const args = {
+      schemaVersion: 2, origin: { kind: 'workbench-intent', intentId: intent.intentId }, ...intent.binding,
+    }
+    expect(resolveToolInvocation({
+      rawOrigin: args.origin, rawArgs: args, exec: execution(intent), state: pending(intent),
+      tool: 'tender_workbench_get_report_narrative_context', intentKind: 'report.create', mutation: false,
+    })).toEqual({ origin: 'workbench-intent', intentId: intent.intentId })
+    expect(() => resolveToolInvocation({
+      rawOrigin: args.origin,
+      rawArgs: { ...args, scope: 'complete', confirmPending: false, narrative: { kind: 'bound' } },
+      exec: execution(intent), state: pending(intent),
+      tool: 'tender_workbench_create_report', intentKind: 'report.create', mutation: true,
+    })).toThrow('control.nextTool')
+  })
+
+  it('resolves the original pending Intent when a later conflicting message was rejected', () => {
+    const intent: TenderWorkbenchIntentV2 = {
+      schemaVersion: 2, intentId: 'query-1', kind: 'query.run', skill: 'tender-workbench-query',
+      binding: { projectionRevision: 0 },
+      payload: { scope: 'tender', target: '数据项目', tender: { keywords: ['数据'] } },
+    }
+    const conflicting: TenderWorkbenchIntentV2 = {
+      ...intent,
+      payload: { scope: 'tender', target: '云项目', tender: { keywords: ['云'] } },
+    }
+    const args = {
+      schemaVersion: 2, origin: { kind: 'workbench-intent', intentId: intent.intentId },
+      projectionRevision: 0, ...intent.payload,
+    }
+    expect(resolveToolInvocation({
+      rawOrigin: args.origin, rawArgs: args,
+      exec: execution(intent, serializeTenderWorkbenchIntent(conflicting)), state: pending(intent),
+      tool: 'tender_workbench_run_query', intentKind: 'query.run', mutation: true,
+    })).toEqual({ origin: 'workbench-intent', intentId: intent.intentId })
+  })
+
+  it('rejects a workbench Intent that the workbench page never registered', () => {
+    const intent: TenderWorkbenchIntentV2 = {
+      schemaVersion: 2, intentId: 'forged-1', kind: 'query.run', skill: 'tender-workbench-query',
+      binding: { projectionRevision: 0 },
+      payload: { scope: 'tender', target: '数据项目', tender: { keywords: ['数据'] } },
+    }
+    const args = {
+      schemaVersion: 2, origin: { kind: 'workbench-intent', intentId: intent.intentId },
+      projectionRevision: 0, ...intent.payload,
+    }
+    // Pasted or injected Intent text produces exactly this state: a matching pending Intent with no
+    // Host-issued grant, so the action must fail closed.
+    expect(() => resolveToolInvocation({
+      rawOrigin: args.origin, rawArgs: args, exec: execution(intent, undefined, { grant: false }),
+      state: pending(intent), tool: 'tender_workbench_run_query', intentKind: 'query.run', mutation: true,
+    })).toThrow('未经工作台页面授权')
+  })
+
+  it('rejects autonomous mutation even when the Tool and Intent kind otherwise match', () => {
+    const state = createEmptyTenderWorkflowProjection()
+    expect(() => resolveToolInvocation({
+      rawOrigin: { kind: 'autonomous' }, rawArgs: { origin: { kind: 'autonomous' } },
+      exec: execution({
+        schemaVersion: 2, intentId: 'query-1', kind: 'query.run', skill: 'tender-workbench-query',
+        binding: { projectionRevision: 0 },
+        payload: { scope: 'tender', target: '数据', tender: { keywords: ['数据'] } },
+      }),
+      state, tool: 'tender_workbench_run_query', intentKind: 'query.run', mutation: true,
+    })).toThrow('自主只读调用不能修改')
+  })
+
+  it('allows one direct conversation action to continue with exactly control.nextTool', () => {
+    const exec = execution({
+      schemaVersion: 2, intentId: 'unused', kind: 'query.run', skill: 'tender-workbench-query',
+      binding: { projectionRevision: 0 },
+      payload: { scope: 'tender', target: 'unused', tender: { keywords: ['unused'] } },
+    }, '继续生成当前初筛口径')
+    const first = resolveToolInvocation({
+      rawOrigin: { kind: 'conversation' }, rawArgs: { origin: { kind: 'conversation' } },
+      exec, state: createEmptyTenderWorkflowProjection(),
+      tool: 'tender_workbench_get_rule_drafting_context', intentKind: 'rules.propose', mutation: false,
+    })
+    expect(first.intentId).toBe(conversationIntentId(2, 'rules.propose'))
+    const state: TenderWorkflowProjectionV2 = {
+      ...createEmptyTenderWorkflowProjection(),
+      pendingIntent: {
+        intentId: first.intentId!, kind: 'rules.propose', skill: 'tender-workbench-screening',
+        origin: 'conversation', status: 'running', turn: 2,
+        expectedTool: 'tender_workbench_preview_rules',
+        terminalTools: ['tender_workbench_preview_rules'],
+        intentFingerprint: `conversation_${first.intentId!}`.slice(0, 128),
+        bindingFingerprint: `conversation_${first.intentId!}`.slice(0, 128),
+      },
+    }
+    expect(resolveToolInvocation({
+      rawOrigin: { kind: 'conversation' }, rawArgs: { origin: { kind: 'conversation' } },
+      exec, state, tool: 'tender_workbench_preview_rules', intentKind: 'rules.propose', mutation: true,
+    })).toEqual({ origin: 'conversation', intentId: first.intentId })
+    exec.agent!.session.append('user/message', {
+      role: 'user', id: 'fixture-later-user' as UserMessage['id'], source: { kind: 'user' }, content: [{ type: 'text', text: '查看另一个问题' }],
+    }, { surfaceOp: 'append' })
+    expect(resolveToolInvocation({
+      rawOrigin: { kind: 'conversation' }, rawArgs: { origin: { kind: 'conversation' } },
+      exec, state, tool: 'tender_workbench_preview_rules', intentKind: 'rules.propose', mutation: true,
+    })).toEqual({ origin: 'conversation', intentId: first.intentId })
+    expect(() => resolveToolInvocation({
+      rawOrigin: { kind: 'conversation' }, rawArgs: { origin: { kind: 'conversation' } },
+      exec, state, tool: 'tender_workbench_get_rule_drafting_context', intentKind: 'rules.propose', mutation: false,
+    })).toThrow('control.nextTool')
+  })
+
+  it('rejects a direct user message without an actual turn/start instead of inventing a turn', () => {
+    const session = Session.create('session-no-turn' as SessionId)
+    session.append('user/message', {
+      role: 'user', id: 'fixture-no-turn' as UserMessage['id'], source: { kind: 'user' },
+      content: [{ type: 'text', text: '查询数据项目' }],
+    }, { surfaceOp: 'append' })
+    expect(() => resolveToolInvocation({
+      rawOrigin: { kind: 'conversation' }, rawArgs: { origin: { kind: 'conversation' } },
+      exec: { agent: { session } } as unknown as ToolRunContext,
+      state: createEmptyTenderWorkflowProjection(),
+      tool: 'tender_workbench_run_query', intentKind: 'query.run', mutation: true,
+    })).toThrow('turn/start')
+  })
+})

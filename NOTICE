@@ -1,0 +1,38 @@
+dsh-tender-workbench NOTICE
+===========================
+
+Upstream work
+-------------
+
+dsh-tender-workbench is derived from the MIT-licensed project
+
+    dsh-tender-workbench — https://github.com/duhu2000/dsh-tender-workbench
+    Copyright (c) 2026 Sunhh3221
+
+The upstream product design, business workflow, documentation set and test suite are the work of
+that project's authors. The full MIT licence text and the original copyright line are retained
+unchanged in LICENSE, as the licence requires.
+
+This distribution (version 0.6.0)
+--------------------------------
+
+Maintained by moqsting. It adapts the plugin to DeepSeek Harness 0.2.0-rc.2 and hardens the
+security issues found in a review of the upstream source:
+
+1. model-visible tool results escape the fence sentinels and every external source string is
+   normalized at the pipeline boundary;
+2. structured workbench Intents require a Host-issued, session-keyed grant instead of trusting
+   message text;
+3. the two monkey-patches of DSH core objects (the workspace `connectWorkspace` override and the
+   `Session.beginSubmission` wrapper) are removed in favour of public surfaces and the plugin's own
+   projection facts;
+4. artifact media types are derived and allow-listed, receipts are bounded, spreadsheet text is
+   normalized without a visible apostrophe, the download Blob URL is released one macrotask later,
+   CI actions are pinned to commit SHAs, and the native smoke probe requires a per-run token.
+
+Third-party notices
+-------------------
+
+Runtime dependencies keep their own licences, installed with the package: exceljs (MIT),
+pdfkit (MIT), zod (MIT), @embedpdf/fonts-sc (see the package for its licence). They are not
+vendored into this repository.
